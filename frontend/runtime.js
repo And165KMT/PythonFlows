@@ -102,7 +102,7 @@ function computeUpstreamColumns(n){
       }
       return []; // unknown until executed
     }
-    if(cur.type==='pandas.SelectColumns'){
+  if(cur.type==='pandas.SelectColumns'){
       return String(cur.params?.columns||'').split(',').map(s=>s.trim()).filter(Boolean);
     }
     if(cur.type==='pandas.GroupByAggregate'){
@@ -144,6 +144,16 @@ function computeUpstreamColumns(n){
       const base = walk(up);
       const add = [index, values].filter(Boolean);
       return uniq(add.length? add : base);
+    }
+    // sklearn / numpy heuristics
+    if(cur.type==='sklearn.MakeBlobs'){
+      return ['x1','x2','label'];
+    }
+    if(cur.type==='sklearn.KMeans'){
+      const cols = walk(up); return uniq([...cols, 'cluster']);
+    }
+    if(cur.type==='numpy.RandomNormal'){
+      const cols = []; const count = parseInt(cur.params?.cols||'2')||2; const prefix = String(cur.params?.prefix||'x'); for(let i=1;i<=count;i++) cols.push(prefix + i); return cols;
     }
     // Fallback: propagate from upstream
     return walk(up);

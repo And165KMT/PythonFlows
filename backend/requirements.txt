@@ -5,3 +5,5 @@ ipykernel
 nest_asyncio
 pandas
 matplotlib
+numpy
+scikit-learn
