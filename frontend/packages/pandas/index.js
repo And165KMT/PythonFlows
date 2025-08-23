@@ -76,12 +76,138 @@ export function register(reg){
   // Plot
   reg.node({
     id: 'pandas.Plot', title:'Plot',
-    defaultParams: { kind:'bar', x:'city', y:'temp' },
-    form(node, ui){ const v=node.params||(node.params={kind:'bar',x:'city',y:'temp'}); const cols = ui.getUpstreamColumns(node); const opts = cols.length? cols.map(c=>`<option ${v.x===c?'selected':''}>${c}</option>`).join('') : `<option>${v.x}</option>`; const optsY = cols.length? cols.map(c=>`<option ${v.y===c?'selected':''}>${c}</option>`).join('') : `<option>${v.y}</option>`; return `
-      <label>kind</label><select name="kind"><option ${v.kind==='bar'?'selected':''}>bar</option><option ${v.kind==='line'?'selected':''}>line</option><option ${v.kind==='scatter'?'selected':''}>scatter</option></select>
-      <label>x</label><select name="x">${opts}</select>
+    defaultParams: { 
+      kind:'bar', x:'city', y:'temp',
+      color:'#1f77b4', linewidth:'2', marker:'', alpha:'1.0',
+      legend:true, grid:false, rot:'0',
+      title:'', xlabel:'', ylabel:'',
+      figsizeW:'6', figsizeH:'4', dpi:'100',
+      xlimMin:'', xlimMax:'', ylimMin:'', ylimMax:'',
+      stacked:false, bins:'10'
+    },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      const optsX = cols.length? cols.map(c=>`<option ${v.x===c?'selected':''}>${c}</option>`).join('') : `<option>${v.x||''}</option>`;
+      const optsY = cols.length? cols.map(c=>`<option ${v.y===c?'selected':''}>${c}</option>`).join('') : `<option>${v.y||''}</option>`;
+      return `
+      <label>kind</label>
+      <select name="kind">
+        <option ${v.kind==='bar'?'selected':''}>bar</option>
+        <option ${v.kind==='line'?'selected':''}>line</option>
+        <option ${v.kind==='scatter'?'selected':''}>scatter</option>
+        <option ${v.kind==='hist'?'selected':''}>hist</option>
+      </select>
+      <label>x</label><select name="x">${optsX}</select>
       <label>y</label><select name="y">${optsY}</select>
+
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer; user-select:none">Advanced</summary>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div>
+            <label>color</label><input name="color" value="${v.color||''}" placeholder="#1f77b4">
+          </div>
+          <div>
+            <label>linewidth</label><input name="linewidth" type="number" step="0.1" value="${v.linewidth||''}">
+          </div>
+          <div>
+            <label>marker</label>
+            <select name="marker">
+              ${['','o','s','^','v','D','x','+','*','.'].map(m=>`<option value="${m}" ${v.marker===m?'selected':''}>${m||'(none)'}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}">
+          </div>
+          <div>
+            <label>legend</label><select name="legend"><option value="true" ${v.legend? 'selected':''}>true</option><option value="false" ${!v.legend? 'selected':''}>false</option></select>
+          </div>
+          <div>
+            <label>grid</label><select name="grid"><option value="true" ${v.grid? 'selected':''}>true</option><option value="false" ${!v.grid? 'selected':''}>false</option></select>
+          </div>
+          <div>
+            <label>rot</label><input name="rot" type="number" step="1" value="${v.rot||'0'}">
+          </div>
+          <div>
+            <label>bins (hist)</label><input name="bins" type="number" step="1" value="${v.bins||'10'}">
+          </div>
+          <div>
+            <label>stacked (bar/hist)</label><select name="stacked"><option value="true" ${v.stacked? 'selected':''}>true</option><option value="false" ${!v.stacked? 'selected':''}>false</option></select>
+          </div>
+          <div>
+            <label>figsize W</label><input name="figsizeW" type="number" step="0.5" value="${v.figsizeW||'6'}">
+          </div>
+          <div>
+            <label>figsize H</label><input name="figsizeH" type="number" step="0.5" value="${v.figsizeH||'4'}">
+          </div>
+          <div>
+            <label>dpi</label><input name="dpi" type="number" step="1" value="${v.dpi||'100'}">
+          </div>
+        </div>
+        <label style="margin-top:6px">title</label><input name="title" value="${v.title||''}">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div><label>xlabel</label><input name="xlabel" value="${v.xlabel||''}"></div>
+          <div><label>ylabel</label><input name="ylabel" value="${v.ylabel||''}"></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div><label>xlim min</label><input name="xlimMin" value="${v.xlimMin||''}"></div>
+          <div><label>xlim max</label><input name="xlimMax" value="${v.xlimMax||''}"></div>
+          <div><label>ylim min</label><input name="ylimMin" value="${v.ylimMin||''}"></div>
+          <div><label>ylim max</label><input name="ylimMax" value="${v.ylimMax||''}"></div>
+        </div>
+      </details>
     `; },
-    code(node, ctx){ const src=ctx.srcVar(node); const kind=node.params.kind||'bar'; const x=node.params.x||'city'; const y=node.params.y||'temp'; ctx.setLastPlotNode(node.id); return [`fig = plt.figure()`, `${src}.plot(kind='${kind}', x='${x}', y='${y}', ax=plt.gca())`, `plt.tight_layout()`, `from IPython.display import display`, `display(plt.gcf())`]; }
+    code(node, ctx){ 
+      const src=ctx.srcVar(node);
+      const v = node.params||{};
+      const kind = v.kind||'bar';
+      const x = v.x||'city';
+      const y = v.y||'temp';
+      const color = v.color||'';
+      const linewidth = v.linewidth||'';
+      const marker = v.marker||'';
+      const alpha = v.alpha||'';
+      const legend = String(v.legend) !== 'false';
+      const grid = String(v.grid) === 'true';
+      const rot = v.rot||'';
+      const bins = v.bins||'';
+      const stacked = String(v.stacked) === 'true';
+      const figsizeW = parseFloat(v.figsizeW||'6') || 6;
+      const figsizeH = parseFloat(v.figsizeH||'4') || 4;
+      const dpi = parseInt(v.dpi||'100');
+      const title = (v.title||'').replace(/`/g,'');
+      const xlabel = (v.xlabel||'').replace(/`/g,'');
+      const ylabel = (v.ylabel||'').replace(/`/g,'');
+      const xlimMin = v.xlimMin||''; const xlimMax=v.xlimMax||'';
+      const ylimMin = v.ylimMin||''; const ylimMax=v.ylimMax||'';
+      ctx.setLastPlotNode(node.id);
+      const lines = [];
+      lines.push(`fig = plt.figure(figsize=(${figsizeW}, ${figsizeH}), dpi=${dpi})`);
+      lines.push(`ax = plt.gca()`);
+      const args = [];
+      args.push(`kind='${kind}'`);
+      if(x) args.push(`x='${x}'`);
+      if(y) args.push(`y='${y}'`);
+      args.push(`ax=ax`);
+      if(color) args.push(`color='${color}'`);
+      if(linewidth) args.push(`linewidth=${parseFloat(linewidth)}`);
+      if(marker) args.push(`marker='${marker}'`);
+      if(alpha) args.push(`alpha=${parseFloat(alpha)}`);
+      if(rot) args.push(`rot=${parseInt(rot)}`);
+      if(kind==='hist' && bins) args.push(`bins=${parseInt(bins)}`);
+      if((kind==='bar' || kind==='hist') && stacked) args.push(`stacked=True`);
+      if(legend!==undefined) args.push(`legend=${legend? 'True':'False'}`);
+      lines.push(`${src}.plot(${args.join(', ')})`);
+      if(title) lines.push(`ax.set_title(r'''${title}''')`);
+      if(xlabel) lines.push(`ax.set_xlabel(r'''${xlabel}''')`);
+      if(ylabel) lines.push(`ax.set_ylabel(r'''${ylabel}''')`);
+      if(grid) lines.push(`ax.grid(True)`);
+      if(xlimMin!=='' && xlimMax!=='') lines.push(`ax.set_xlim(${parseFloat(xlimMin)}, ${parseFloat(xlimMax)})`);
+      if(ylimMin!=='' && ylimMax!=='') lines.push(`ax.set_ylim(${parseFloat(ylimMin)}, ${parseFloat(ylimMax)})`);
+      lines.push(`plt.tight_layout()`);
+      lines.push(`from IPython.display import display`);
+      lines.push(`display(plt.gcf())`);
+      return lines;
+    }
   });
 }

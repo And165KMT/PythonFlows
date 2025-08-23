@@ -16,7 +16,7 @@ tabsBar.style.marginBottom = '8px';
 toolbarEl.before(tabsBar);
 
 // Global state
-const state = { nodes: [], edges: [], nextId: 1, pendingSrc: null, lastPlotNodeId: null, activePkg: null };
+const state = { nodes: [], edges: [], nextId: 1, pendingSrc: null, lastPlotNodeId: null, activePkg: null, selectedNodeId: null };
 
 // Global Run button
 const globalRunBtn = document.createElement('button');
@@ -66,6 +66,24 @@ function drawEdges(){
 function getPortCenter(nodeId, selector){ const nodeEl = document.querySelector(`[data-node-id="${nodeId}"]`); if(!nodeEl) return null; const port = nodeEl.querySelector(selector); if(!port) return null; return centerOf(port); }
 function setGhost(toX, toY){ let ghost = document.getElementById('ghost-edge'); if(!ghost){ ghost = document.createElementNS('http://www.w3.org/2000/svg','path'); ghost.id='ghost-edge'; ghost.setAttribute('class','edge'); ghost.setAttribute('stroke-dasharray','5,5'); edgesSvg.appendChild(ghost); } const a = getPortCenter(state.pendingSrc, '.port.out'); if(!a){ ghost.remove(); return; } const dx = Math.abs(toX - a.x) * 0.5; const d = `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${toX-dx} ${toY}, ${toX} ${toY}`; ghost.setAttribute('d', d); }
 function clearGhost(){ const ghost = document.getElementById('ghost-edge'); if(ghost) ghost.remove(); }
+
+// Selection helpers (for Delete-key removal)
+function selectNode(id){
+  state.selectedNodeId = id;
+  document.querySelectorAll('.node').forEach(el=>{
+    if(el.dataset.nodeId === id){ el.classList.add('selected'); el.style.outline = '2px solid #1f6feb'; }
+    else { el.classList.remove('selected'); el.style.outline = 'none'; }
+  });
+}
+function clearSelection(){ state.selectedNodeId = null; document.querySelectorAll('.node').forEach(el=>{ el.classList.remove('selected'); el.style.outline = 'none'; }); }
+function deleteSelectedNode(){
+  const id = state.selectedNodeId; if(!id) return;
+  state.nodes = state.nodes.filter(n=> n.id !== id);
+  state.edges = state.edges.filter(e=> e.from !== id && e.to !== id);
+  if(state.lastPlotNodeId === id) state.lastPlotNodeId = null;
+  state.selectedNodeId = null;
+  render();
+}
 
 // Infer upstream column names statically (best-effort)
 function upstreamOf(node){ const e = state.edges.find(x=>x.to===node.id); if(!e) return null; return getNode(e.from); }
@@ -157,13 +175,17 @@ function createNodeEl(node){
     <div style=\"display:flex; gap:6px; padding:6px 10px; border-top:1px solid #263041;\">
       <button class=\"node-run\" style=\"flex:1; padding:6px; background:#1f6feb; color:#fff; border:0; border-radius:6px; cursor:pointer\">▶ Run</button>
     </div>
-    <div class=\"preview\" id=\"prev-${node.id}\"><div class=\"empty\">No output yet</div></div>
+  <div class=\"preview\" id=\"prev-${node.id}\"><div class=\"empty\">No output yet</div></div>
   `;
+  // Apply selected style if this is the selected node
+  if(state.selectedNodeId === node.id){ el.classList.add('selected'); el.style.outline = '2px solid #1f6feb'; }
   // Dragging
   let dragging=false, offX=0, offY=0; const head=el.querySelector('.head');
   head.addEventListener('mousedown', e=>{ dragging=true; document.body.style.userSelect='none'; const rect = canvasWrap.getBoundingClientRect(); const left = parseInt(el.style.left||'0'), top = parseInt(el.style.top||'0'); offX = e.clientX - (rect.left + left); offY = e.clientY - (rect.top + top); });
   window.addEventListener('mouseup', ()=>{ dragging=false; document.body.style.userSelect='auto'; drawEdges(); });
   window.addEventListener('mousemove', e=>{ if(!dragging) return; const rect = canvasWrap.getBoundingClientRect(); const nx = Math.max(0, e.clientX - rect.left - offX); const ny = Math.max(0, e.clientY - rect.top - offY); el.style.left = nx + 'px'; el.style.top = ny + 'px'; node.x=nx; node.y=ny; drawEdges(); });
+  // Select this node when clicked
+  el.addEventListener('mousedown', (e)=>{ selectNode(node.id); e.stopPropagation(); });
   // Connect
   const outPort = el.querySelector('.port.out'); const inPort = el.querySelector('.port.in');
   outPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); state.pendingSrc = node.id; outPort.classList.add('selected'); });
@@ -173,6 +195,12 @@ function createNodeEl(node){
   el.querySelector('.node-run').addEventListener('click', async ()=>{
     ensureWS(); statusEl.textContent='running...'; const code = genCodeUpTo(node.id); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js = {}; try{ js = await res.json(); }catch{} appendLog('Sent exec (node): ' + JSON.stringify(js)); statusEl.textContent='idle';
   });
+  // Click-to-zoom for plot previews
+  const prev = el.querySelector(`#prev-${node.id}`);
+  if(prev){ prev.addEventListener('click', (e)=>{
+    const img = prev.querySelector('img'); if(!img) return;
+    openZoomOverlay(img.src);
+  }); }
   return el;
 }
 
@@ -207,8 +235,16 @@ function renderTabs(){ tabsBar.innerHTML = ''; registry.packages.forEach(p=>{ co
 let ws; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> appendLog('[ws] connected'); ws.onclose = ()=> appendLog('[ws] closed'); ws.onmessage = ev => { const data = JSON.parse(ev.data); if (data.type === 'stream') { appendLog(data.content.text || ''); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ const tgt = document.getElementById('prev-' + (state.lastPlotNodeId||'')); if(tgt){ tgt.innerHTML = `<img src="data:image/png;base64,${d['image/png']}">`; } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); } }; }
 
 // Background events
-canvasWrap.addEventListener('click', ()=>{ state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); clearGhost(); });
+canvasWrap.addEventListener('click', ()=>{ state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); clearGhost(); clearSelection(); });
 window.addEventListener('resize', drawEdges); window.addEventListener('scroll', drawEdges, { passive: true }); canvasWrap.addEventListener('scroll', drawEdges, { passive: true }); window.addEventListener('mousemove', (e)=>{ if(!state.pendingSrc) return; const rect = edgesSvg.getBoundingClientRect(); setGhost(e.clientX - rect.left, e.clientY - rect.top); });
+
+// Delete key to remove selected node (tab)
+window.addEventListener('keydown', (e)=>{
+  if(e.key !== 'Delete') return;
+  const a = document.activeElement; const tag = (a && a.tagName) ? a.tagName.toLowerCase() : '';
+  if(tag === 'input' || tag === 'textarea' || (a && a.isContentEditable)) return; // don't delete while typing
+  if(state.selectedNodeId){ e.preventDefault(); deleteSelectedNode(); }
+});
 
 // Sidebar buttons
 document.getElementById('installBtn').addEventListener('click', async ()=>{ statusEl.textContent='installing...'; appendLog('Installing requirements...'); const res = await fetch('/bootstrap', { method:'POST' }); const js = await res.json().catch(()=>({})); appendLog(js.output ? js.output : JSON.stringify(js)); statusEl.textContent='idle'; });
@@ -219,3 +255,32 @@ document.getElementById('sampleBtn').addEventListener('click', ()=>{ state.nodes
 async function loadPackages(){ const res = await fetch('/api/packages'); const list = await res.json(); registry.packages = list.map(x=> ({name:x.name, label:x.label})); for(const p of list){ try{ const mod = await import(`/pkg/${p.name}/${p.entry}`); if(mod && typeof mod.register==='function'){ const reg = { node(def){ if(!def || !def.id) return; registry.nodes.set(def.id, def); const pkgName = p.name; if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []); registry.byPackage.get(pkgName).push(def.id); } }; mod.register(reg); } }catch(e){ appendLog(`[pkg:${p.name}] load error`); } } state.activePkg = registry.packages[0]?.name || null; renderTabs(); renderToolbar(); document.getElementById('sampleBtn').click(); }
 async function callHealth(){ try { const r=await fetch('/health'); appendLog('[health] '+ JSON.stringify(await r.json())); } catch {} }
 callHealth(); loadPackages(); syncEdgesViewport();
+
+// Zoom overlay implementation
+let zoomOverlay;
+function ensureOverlay(){
+  if(zoomOverlay) return zoomOverlay;
+  const ov = document.createElement('div');
+  ov.style.position='fixed'; ov.style.left='0'; ov.style.top='0'; ov.style.right='0'; ov.style.bottom='0';
+  ov.style.background='rgba(0,0,0,0.8)'; ov.style.display='none'; ov.style.zIndex='9999';
+  ov.innerHTML = `
+    <div id="zoomWrap" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; cursor:grab;">
+      <img id="zoomImg" src="" style="max-width:90%; max-height:90%; transform:scale(1); transition:transform 0.05s ease-out;" />
+    </div>
+    <button id="zoomClose" style="position:absolute; top:12px; right:12px; padding:8px 12px; border:0; border-radius:6px; background:#1f6feb; color:#fff; cursor:pointer">Close</button>
+  `;
+  document.body.appendChild(ov);
+  const img = ov.querySelector('#zoomImg');
+  const wrap = ov.querySelector('#zoomWrap');
+  ov.querySelector('#zoomClose').addEventListener('click', ()=>{ ov.style.display='none'; img.style.transform='scale(1)'; scale=1; });
+  ov.addEventListener('click', (e)=>{ if(e.target===ov) { ov.style.display='none'; img.style.transform='scale(1)'; scale=1; } });
+  let scale=1;
+  ov.addEventListener('wheel', (e)=>{ e.preventDefault(); const delta = Math.sign(e.deltaY); scale *= (delta>0? 0.9:1.1); scale = Math.min(10, Math.max(0.2, scale)); img.style.transform = `scale(${scale})`; }, { passive:false });
+  // basic drag to pan
+  let dragging=false, sx=0, sy=0, ox=0, oy=0;
+  wrap.addEventListener('mousedown', (e)=>{ dragging=true; wrap.style.cursor='grabbing'; sx=e.clientX; sy=e.clientY; const cur = getComputedStyle(wrap).transform; ox = 0; oy = 0; });
+  window.addEventListener('mouseup', ()=>{ dragging=false; wrap.style.cursor='grab'; });
+  window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx=e.clientX-sx; const dy=e.clientY-sy; wrap.style.transform = `translate(${dx}px, ${dy}px)`; });
+  zoomOverlay = ov; return ov;
+}
+function openZoomOverlay(src){ const ov = ensureOverlay(); const img = ov.querySelector('#zoomImg'); const wrap = ov.querySelector('#zoomWrap'); img.src = src; img.style.transform='scale(1)'; wrap.style.transform='translate(0,0)'; ov.style.display='block'; }
