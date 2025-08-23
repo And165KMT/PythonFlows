@@ -89,36 +89,79 @@ function deleteSelectedNode(){
 function upstreamOf(node){ const e = state.edges.find(x=>x.to===node.id); if(!e) return null; return getNode(e.from); }
 function computeUpstreamColumns(n){
   const seen = new Set();
+  function uniq(arr){ const s=new Set(); const out=[]; for(const x of arr){ if(!s.has(x)){ s.add(x); out.push(x); } } return out; }
   function walk(cur){
     if(!cur || seen.has(cur.id)) return [];
     seen.add(cur.id);
+    const up = upstreamOf(cur);
+    // Base cases by node type
+    if(cur.type==='pandas.ReadCSV'){
+      if(cur.params?.mode==='inline' && cur.params?.inline){
+        const first = String(cur.params.inline).split(/\r?\n/)[0]||'';
+        return first.split(',').map(s=>s.trim()).filter(Boolean);
+      }
+      return []; // unknown until executed
+    }
     if(cur.type==='pandas.SelectColumns'){
       return String(cur.params?.columns||'').split(',').map(s=>s.trim()).filter(Boolean);
     }
     if(cur.type==='pandas.GroupByAggregate'){
       const by = String(cur.params?.by||'group'); const val = String(cur.params?.value||'value');
-      return [by, val];
+      return uniq([by, val]);
     }
-    if(cur.type==='pandas.ReadCSV'){
-      if(cur.params?.mode==='inline' && cur.params?.inline){
-        const first = String(cur.params.inline).split(/\r?\n/)[0]||''; return first.split(',').map(s=>s.trim()).filter(Boolean);
-      }
+    if(cur.type==='pandas.FilterRows' || cur.type==='pandas.DropNA' || cur.type==='pandas.FillNA' || cur.type==='pandas.HeadTail' || cur.type==='pandas.SortValues'){
+      return walk(up);
     }
-    if(cur.type==='pandas.FilterRows'){
-      const up = upstreamOf(cur); return walk(up);
+    if(cur.type==='pandas.AddColumn'){
+      const cols = walk(up);
+      const name = String(cur.params?.newcol||'new').trim();
+      return uniq(name? [...cols, name]: cols);
     }
-    const up = upstreamOf(cur); return up ? walk(up) : [];
+    if(cur.type==='pandas.RenameColumns'){
+      const cols = walk(up);
+      const mappingStr = String(cur.params?.mapping||'');
+      const map = new Map();
+      mappingStr.split(/\r?\n|,/).map(s=>s.trim()).filter(Boolean).forEach(s=>{
+        const [oldN, newN] = s.split(':');
+        if(oldN){ map.set(oldN.trim(), (newN||'').trim()); }
+      });
+      return cols.map(c=> map.has(c) && map.get(c) ? map.get(c) : c);
+    }
+    if(cur.type==='pandas.ValueCounts'){
+      const col = String(cur.params?.column||'').trim();
+      return col? [col, 'count'] : walk(up);
+    }
+    if(cur.type==='pandas.Melt'){
+      const idv = String(cur.params?.id_vars||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const varName = (cur.params?.var_name||'variable').trim();
+      const valueName = (cur.params?.value_name||'value').trim();
+      return uniq([...idv, varName, valueName]);
+    }
+    if(cur.type==='pandas.PivotTable'){
+      // Heuristic: can't infer pivoted column levels; expose index + values at least
+      const index = String(cur.params?.index||'').trim();
+      const values = String(cur.params?.values||'').trim();
+      const base = walk(up);
+      const add = [index, values].filter(Boolean);
+      return uniq(add.length? add : base);
+    }
+    // Fallback: propagate from upstream
+    return walk(up);
   }
   const up = upstreamOf(n); return walk(up);
 }
 function nodeFormHtml(def, node){ if(typeof def.form === 'function') return def.form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node) }); return ''; }
 
-function refreshPlotForms(){
-  state.nodes.filter(n=> n.type==='pandas.Plot').forEach(n=>{
+function refreshForms(){
+  state.nodes.forEach(n=>{
     const el = document.querySelector(`[data-node-id="${n.id}"]`);
     if(!el) return;
-    const body = el.querySelector('.body');
-    if(body){ body.innerHTML = nodeFormHtml(registry.nodes.get(n.type), n); bindForm(el, n); }
+    const body = el.querySelector('.body'); if(!body) return;
+    const def = registry.nodes.get(n.type);
+    const html = nodeFormHtml(def, n);
+    if(typeof html === 'string' && html !== '' && body.innerHTML !== html){
+      body.innerHTML = html; bindForm(el, n);
+    }
   });
 }
 
@@ -131,6 +174,8 @@ function bindForm(el, node){
         el.querySelector('.body').innerHTML = nodeFormHtml(registry.nodes.get(node.type), node);
         bindForm(el, node);
       }
+      // After any param change, refresh dependent forms (e.g., Plot x/y)
+      refreshForms();
     });
   });
   const chooseBtn = el.querySelector('.choose-folder');
@@ -189,7 +234,7 @@ function createNodeEl(node){
   // Connect
   const outPort = el.querySelector('.port.out'); const inPort = el.querySelector('.port.in');
   outPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); state.pendingSrc = node.id; outPort.classList.add('selected'); });
-  inPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); if(state.pendingSrc && state.pendingSrc!==node.id){ state.edges = state.edges.filter(e=> e.to!==node.id); state.edges.push({from: state.pendingSrc, to: node.id}); state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); drawEdges(); clearGhost(); refreshPlotForms(); } });
+  inPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); if(state.pendingSrc && state.pendingSrc!==node.id){ state.edges = state.edges.filter(e=> e.to!==node.id); state.edges.push({from: state.pendingSrc, to: node.id}); state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); drawEdges(); clearGhost(); refreshForms(); } });
   bindForm(el, node);
   // Per-node Run
   el.querySelector('.node-run').addEventListener('click', async ()=>{
@@ -225,7 +270,8 @@ function genCodeUpTo(targetId){
   return lines.join('\n');
 }
 
-function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); drawEdges(); const code = genCode(); genCodeEl.textContent = code; }
+function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); drawEdges(); const code = genCode(); genCodeEl.textContent = code; // ensure forms reflect current graph
+  refreshForms(); }
 function addNode(type, x=80, y=80){ const def = registry.nodes.get(type); const n = { id: uid(), type, x, y, params: JSON.parse(JSON.stringify(def?.defaultParams||{})) }; state.nodes.push(n); const el = createNodeEl(n); nodesEl.appendChild(el); drawEdges(); return n; }
 
 function renderToolbar(){ toolbarEl.innerHTML = ''; const pkg = state.activePkg || registry.packages[0]?.name; state.activePkg = pkg; const list = registry.byPackage.get(pkg) || []; list.forEach(type=>{ const def = registry.nodes.get(type); const btn = document.createElement('button'); btn.textContent = '➕ ' + (def.title || type); btn.dataset.type = type; btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); }); toolbarEl.appendChild(btn); }); }
