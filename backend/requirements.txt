@@ -1,0 +1,7 @@
+fastapi[all]
+uvicorn
+jupyter_client>=8
+ipykernel
+nest_asyncio
+pandas
+matplotlib
