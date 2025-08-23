@@ -210,4 +210,197 @@ export function register(reg){
       return lines;
     }
   });
+
+  // SortValues
+  reg.node({
+    id: 'pandas.SortValues', title:'Sort',
+    defaultParams: { by:'', ascending:true },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      const opts = cols.map(c=>`<option ${v.by===c?'selected':''}>${c}</option>`).join('');
+      return `
+        <label>by</label><select name="by">${opts}</select>
+        <label>ascending</label><select name="ascending"><option value="true" ${String(v.ascending)!=='false'?'selected':''}>true</option><option value="false" ${String(v.ascending)==='false'?'selected':''}>false</option></select>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const by = node.params?.by || '';
+      const asc = String(node.params?.ascending) !== 'false';
+      return [
+        `${v} = ${src}.sort_values(by='${by}', ascending=${asc?'True':'False'})`,
+        `print(${v}.head().to_string())`
+      ];
+    }
+  });
+
+  // RenameColumns
+  reg.node({
+    id: 'pandas.RenameColumns', title:'Rename',
+    defaultParams: { mapping:'' },
+    form(node){
+      const v=node.params||(node.params={});
+      return `
+        <label>rename (one per line: old:new)</label>
+        <textarea name="mapping" placeholder="old:new\nold2:new2">${v.mapping||''}</textarea>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const mappingStr = (node.params?.mapping||'');
+      const pairs = mappingStr.split(/\r?\n|,/).map(s=>s.trim()).filter(Boolean).map(s=>{
+        const m = s.split(':');
+        const k=(m[0]||'').trim().replace(/'/g,"\'");
+        const val=(m[1]||'').trim().replace(/'/g,"\'");
+        return k? [k,val]: null;
+      }).filter(Boolean);
+      const dictPy = '{' + pairs.map(([a,b])=>`'${a}': '${b}'`).join(', ') + '}';
+      return [
+        `${v} = ${src}.rename(columns=${dictPy})`,
+        `print(${v}.head().to_string())`
+      ];
+    }
+  });
+
+  // DropNA
+  reg.node({
+    id: 'pandas.DropNA', title:'DropNA',
+    defaultParams: { subset:'', how:'any' },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>subset (comma)</label><input name="subset" placeholder="col1,col2" value="${v.subset||''}">
+      <label>how</label><select name="how"><option ${v.how==='any'?'selected':''}>any</option><option ${v.how==='all'?'selected':''}>all</option></select>
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const subset = (node.params?.subset||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const how = (node.params?.how==='all')? 'all':'any';
+      const args=[]; if(subset.length) args.push(`subset=[${subset.map(c=>`'${c}'`).join(', ')}]`);
+      args.push(`how='${how}'`);
+      return [ `${v} = ${src}.dropna(${args.join(', ')})`, `print(${v}.head().to_string())` ];
+    }
+  });
+
+  // FillNA
+  reg.node({
+    id: 'pandas.FillNA', title:'FillNA',
+    defaultParams: { column:'', value:'' },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      const opts = [''].concat(cols).map(c=>`<option value="${c}" ${v.column===c?'selected':''}>${c||'(all columns)'}</option>`).join('');
+      return `
+        <label>column</label><select name="column">${opts}</select>
+        <label>value</label><input name="value" value="${v.value||''}" placeholder="0 or text">
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const col = node.params?.column || '';
+      const raw = node.params?.value ?? '';
+      if(raw === '') return [ `${v} = ${src}`, `print(${v}.head().to_string())` ];
+      const num = isFinite(parseFloat(raw)) && String(parseFloat(raw)) === String(raw).trim();
+      const pyVal = num ? raw : `r'''${String(raw).replace(/`/g,'')}'''`;
+      if(col){
+        return [ `${v} = ${src}.copy()`, `${v}['${col}'] = ${v}['${col}'].fillna(${pyVal})`, `print(${v}.head().to_string())` ];
+      }
+      return [ `${v} = ${src}.fillna(${pyVal})`, `print(${v}.head().to_string())` ];
+    }
+  });
+
+  // Head/Tail
+  reg.node({
+    id: 'pandas.HeadTail', title:'Head/Tail',
+    defaultParams: { mode:'head', n:'5' },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>mode</label><select name="mode"><option ${v.mode==='head'?'selected':''}>head</option><option ${v.mode==='tail'?'selected':''}>tail</option></select>
+      <label>n</label><input name="n" type="number" step="1" value="${v.n||'5'}">
+    `; },
+    code(node, ctx){ const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); const mode=(node.params?.mode==='tail')?'tail':'head'; const n=parseInt(node.params?.n||'5')||5; return [ `${v} = ${src}.${mode}(${n})`, `print(${v}.to_string())` ]; }
+  });
+
+  // ValueCounts
+  reg.node({
+    id: 'pandas.ValueCounts', title:'ValueCounts',
+    defaultParams: { column:'' },
+    form(node, ui){ const v=node.params||(node.params={}); const cols=ui.getUpstreamColumns(node); const opts = cols.map(c=>`<option ${v.column===c?'selected':''}>${c}</option>`).join(''); return `
+      <label>column</label><select name="column">${opts}</select>
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const col = node.params?.column || '';
+      if(!col) return [ `${v} = ${src}`, `print(${v}.head().to_string())` ];
+      return [ `${v} = ${src}['${col}'].value_counts().reset_index(name='count').rename(columns={'index':'${col}'})`, `print(${v}.head().to_string())` ];
+    }
+  });
+
+  // PivotTable
+  reg.node({
+    id: 'pandas.PivotTable', title:'PivotTable',
+    defaultParams: { index:'', columns:'', values:'', aggfunc:'mean', fill_value:'' },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      const opts = cols.map(c=>`<option ${v.index===c?'selected':''}>${c}</option>`).join('');
+      const opts2 = cols.map(c=>`<option ${v.columns===c?'selected':''}>${c}</option>`).join('');
+      const opts3 = cols.map(c=>`<option ${v.values===c?'selected':''}>${c}</option>`).join('');
+      return `
+        <label>index</label><select name="index">${opts}</select>
+        <label>columns</label><select name="columns">${opts2}</select>
+        <label>values</label><select name="values">${opts3}</select>
+        <label>aggfunc</label><select name="aggfunc"><option ${v.aggfunc==='mean'?'selected':''}>mean</option><option ${v.aggfunc==='sum'?'selected':''}>sum</option><option ${v.aggfunc==='count'?'selected':''}>count</option><option ${v.aggfunc==='max'?'selected':''}>max</option><option ${v.aggfunc==='min'?'selected':''}>min</option></select>
+        <label>fill_value (optional)</label><input name="fill_value" value="${v.fill_value||''}" placeholder="0">
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const index = node.params?.index || '';
+      const columns = node.params?.columns || '';
+      const values = node.params?.values || '';
+      const aggfunc = node.params?.aggfunc || 'mean';
+      const fvRaw = node.params?.fill_value ?? '';
+      const num = fvRaw!=='' && isFinite(parseFloat(fvRaw)) && String(parseFloat(fvRaw)) === String(fvRaw).trim();
+      const fv = fvRaw!=='' ? (num? fvRaw : `r'''${String(fvRaw).replace(/`/g,'')}'''`) : null;
+      const args = [`index='${index}'`,`columns='${columns}'`,`values='${values}'`,`aggfunc='${aggfunc}'`];
+      if(fv!==null) args.push(`fill_value=${fv}`);
+      return [ `${v} = pd.pivot_table(${src}, ${args.join(', ')})`, `${v} = ${v}.reset_index()`, `print(${v}.head().to_string())` ];
+    }
+  });
+
+  // Melt
+  reg.node({
+    id: 'pandas.Melt', title:'Melt',
+    defaultParams: { id_vars:'', value_vars:'', var_name:'variable', value_name:'value' },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>id_vars (comma)</label><input name="id_vars" value="${v.id_vars||''}">
+      <label>value_vars (comma)</label><input name="value_vars" value="${v.value_vars||''}">
+      <label>var_name</label><input name="var_name" value="${v.var_name||'variable'}">
+      <label>value_name</label><input name="value_name" value="${v.value_name||'value'}">
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const idv = (node.params?.id_vars||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const valv = (node.params?.value_vars||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const varName = (node.params?.var_name||'variable').replace(/`/g,'');
+      const valueName = (node.params?.value_name||'value').replace(/`/g,'');
+      return [ `${v} = ${src}.melt(id_vars=[${idv.map(x=>`'${x}'`).join(', ')}], value_vars=[${valv.map(x=>`'${x}'`).join(', ')}], var_name='${varName}', value_name='${valueName}')`, `print(${v}.head().to_string())` ];
+    }
+  });
+
+  // AddColumn (assign via eval expression)
+  reg.node({
+    id: 'pandas.AddColumn', title:'AddColumn',
+    defaultParams: { newcol:'new', expr:'' },
+    form(node, ui){ const v=node.params||(node.params={}); return `
+      <label>new column</label><input name="newcol" value="${v.newcol||'new'}" placeholder="new">
+      <label>expr (uses columns)</label><input name="expr" value="${v.expr||''}" placeholder="temp * 1.8 + 32">
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const newcol = (node.params?.newcol||'new').replace(/`/g,'');
+      const expr = (node.params?.expr||'').replace(/`/g,'');
+      if(!expr) return [ `${v} = ${src}`, `print(${v}.head().to_string())` ];
+      return [ `${v} = ${src}.copy()`, `${v}['${newcol}'] = ${src}.eval(r'''${expr}''')`, `print(${v}.head().to_string())` ];
+    }
+  });
 }

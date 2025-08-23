@@ -16,7 +16,7 @@ Requirements (Windows, cmd.exe):
 	.venv\Scripts\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 	```
 5) Open http://localhost:8000 in your browser
-
+![alt text](image.png)
 Notes:
 License:
 - This repository is released under FlowPython Community Edition License (FP-CEL). Individuals are free to use; companies must contact us for commercial use or for more than one sheet. See LICENSE.md.
