@@ -97,4 +97,73 @@ export function register(reg){
       ];
     }
   });
+
+  // Train/Test split (adds a 'split' column with 'train'/'test')
+  reg.node({
+    id: 'sklearn.TrainTestSplit', title:'Train/Test Split',
+    defaultParams: { test_size:'0.2', random_state:'42', stratify:'' },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      const opts = [''].concat(cols).map(c=>`<option ${v.stratify===c?'selected':''}>${c||'(none)'}</option>`).join('');
+      return `
+        <label>test_size</label><input name="test_size" type="number" min="0" max="0.9" step="0.05" value="${v.test_size||'0.2'}">
+        <label>random_state</label><input name="random_state" type="number" value="${v.random_state||'42'}">
+        <label>stratify (optional)</label><select name="stratify">${opts}</select>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const ts = parseFloat(node.params?.test_size||'0.2')||0.2;
+      const rs = parseInt(node.params?.random_state||'42')||42;
+      const strat = (node.params?.stratify||'');
+      return [
+        `from sklearn.model_selection import train_test_split`,
+        `${v} = ${src}.copy()`,
+        `import numpy as np`,
+        `idx = np.arange(len(${src}))`,
+        strat? `y_strat = ${src}['${strat}']` : `y_strat = None`,
+        `tr, te = train_test_split(idx, test_size=${ts}, random_state=${rs}, stratify=y_strat)`,
+        `${v}['split'] = 'train'`,
+        `${v}.loc[${v}.index.isin(te), 'split'] = 'test'`,
+        `print(${v}.head().to_string())`
+      ];
+    }
+  });
+
+  // StandardScaler (in-place or with suffix)
+  reg.node({
+    id: 'sklearn.StandardScaler', title:'StandardScaler',
+    defaultParams: { columns:'', with_mean:true, with_std:true, inplace:true, suffix:'_scaled' },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node);
+      return `
+        <label>columns (comma, empty = all numeric)</label><input name="columns" value="${v.columns||''}">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div><label>with_mean</label><select name="with_mean"><option value="true" ${String(v.with_mean)!=='false'?'selected':''}>true</option><option value="false" ${String(v.with_mean)==='false'?'selected':''}>false</option></select></div>
+          <div><label>with_std</label><select name="with_std"><option value="true" ${String(v.with_std)!=='false'?'selected':''}>true</option><option value="false" ${String(v.with_std)==='false'?'selected':''}>false</option></select></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div><label>inplace</label><select name="inplace"><option value="true" ${String(v.inplace)!=='false'?'selected':''}>true</option><option value="false" ${String(v.inplace)==='false'?'selected':''}>false</option></select></div>
+          <div><label>suffix</label><input name="suffix" value="${v.suffix||'_scaled'}"></div>
+        </div>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const colsStr = String(node.params?.columns||'');
+      const cols = colsStr.split(',').map(s=>s.trim()).filter(Boolean);
+      const withMean = String(node.params?.with_mean) !== 'false';
+      const withStd = String(node.params?.with_std) !== 'false';
+      const inplace = String(node.params?.inplace) !== 'false';
+      const suffix = (node.params?.suffix||'_scaled').replace(/`/g,'');
+      const colSel = cols.length? `[${cols.map(c=>`'${c}'`).join(', ')}]` : `${src}.select_dtypes(include=['number']).columns`;
+      const header = [`from sklearn.preprocessing import StandardScaler`, `${v} = ${src}.copy()`, `sc = StandardScaler(with_mean=${withMean?'True':'False'}, with_std=${withStd?'True':'False'})`];
+      const body = inplace
+        ? [`_sel = list(${colSel})`, `${v}[_sel] = sc.fit_transform(${v}[_sel])`]
+        : [`_sel = list(${colSel})`, `${v}[[c+'${suffix}' for c in _sel]] = sc.fit_transform(${v}[_sel])`];
+      return [...header, ...body, `print(${v}.head().to_string())`];
+    }
+  });
 }

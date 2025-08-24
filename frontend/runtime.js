@@ -16,7 +16,7 @@ tabsBar.style.marginBottom = '8px';
 toolbarEl.before(tabsBar);
 
 // Global state
-const state = { nodes: [], edges: [], nextId: 1, pendingSrc: null, lastPlotNodeId: null, activePkg: null, selectedNodeId: null };
+const state = { nodes: [], edges: [], nextId: 1, pendingSrc: null, lastPlotNodeId: null, activePkg: null, selectedNodeId: null, preview: { head: new Map(), desc: new Map(), headHtml: new Map(), descHtml: new Map() }, stream: { currentNodeId: null, buffers: new Map() } };
 
 // Global Run button
 const globalRunBtn = document.createElement('button');
@@ -46,6 +46,9 @@ function clearLog(){ log.textContent = ''; }
 function getNode(id){ return state.nodes.find(n => n.id === id); }
 function centerOf(el){ const r = el.getBoundingClientRect(); const p = edgesSvg.getBoundingClientRect(); return { x: r.left - p.left + r.width/2, y: r.top - p.top + r.height/2 }; }
 
+// Preview dock removed; keep a no-op for callers
+function updatePreviewDock(){}
+
 function syncEdgesViewport(){
   const w = canvasWrap.clientWidth || canvasWrap.getBoundingClientRect().width;
   const h = canvasWrap.clientHeight || canvasWrap.getBoundingClientRect().height;
@@ -67,6 +70,92 @@ function getPortCenter(nodeId, selector){ const nodeEl = document.querySelector(
 function setGhost(toX, toY){ let ghost = document.getElementById('ghost-edge'); if(!ghost){ ghost = document.createElementNS('http://www.w3.org/2000/svg','path'); ghost.id='ghost-edge'; ghost.setAttribute('class','edge'); ghost.setAttribute('stroke-dasharray','5,5'); edgesSvg.appendChild(ghost); } const a = getPortCenter(state.pendingSrc, '.port.out'); if(!a){ ghost.remove(); return; } const dx = Math.abs(toX - a.x) * 0.5; const d = `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${toX-dx} ${toY}, ${toX} ${toY}`; ghost.setAttribute('d', d); }
 function clearGhost(){ const ghost = document.getElementById('ghost-edge'); if(ghost) ghost.remove(); }
 
+// Quick Add menu (suggest next node after starting a connection)
+const quickAdd = document.createElement('div');
+quickAdd.id = 'quickAdd';
+quickAdd.style.position = 'absolute';
+quickAdd.style.display = 'none';
+quickAdd.style.zIndex = '2000';
+quickAdd.style.background = '#0b1220';
+quickAdd.style.border = '1px solid #263041';
+quickAdd.style.borderRadius = '8px';
+quickAdd.style.minWidth = '260px';
+quickAdd.style.maxWidth = '320px';
+quickAdd.style.boxShadow = '0 8px 24px rgba(0,0,0,0.35)';
+quickAdd.innerHTML = `
+  <div style="padding:8px 8px 0 8px; border-bottom:1px solid #263041">
+    <input id="qaSearch" placeholder="Search nodes..." style="width:100%; padding:6px 8px; border:1px solid #2c3b52; border-radius:6px; background:#111824; color:var(--text)">
+  </div>
+  <div id="qaSuggestedWrap" style="padding:8px; display:none">
+    <div style="font-size:12px; opacity:0.8; margin-bottom:6px">Suggested</div>
+    <div id="qaSuggested" style="display:flex; flex-wrap:wrap; gap:6px"></div>
+  </div>
+  <div id="qaAll" style="max-height:240px; overflow:auto; padding:6px 0"></div>
+`;
+document.body.appendChild(quickAdd);
+
+function allNodeTypes(){
+  const out=[]; registry.byPackage.forEach((types, pkg)=>{ types.forEach(t=> out.push(t)); }); return out;
+}
+function nodeLabelOf(type){ const def = registry.nodes.get(type); return def?.title || type.split('.').slice(-1)[0] || type; }
+function itemHtml(type){ return `<button data-type="${type}" style="display:block; width:100%; text-align:left; padding:8px 10px; background:transparent; color:var(--text); border:0; cursor:pointer">${nodeLabelOf(type)} <span style="opacity:0.6; font-size:12px">(${type})</span></button>`; }
+function buttonPill(type){ return `<button data-type="${type}" style="padding:6px 8px; background:#111824; color:var(--text); border:1px solid #263041; border-radius:999px; cursor:pointer">${nodeLabelOf(type)}</button>`; }
+
+function suggestionsForNode(fromId){
+  const n = getNode(fromId); const t = n?.type || '';
+  const has = (id)=> registry.nodes.has(id);
+  const acc = [];
+  if(t.startsWith('pandas.')){
+    ['pandas.SelectColumns','pandas.FilterRows','pandas.SortValues','pandas.GroupByAggregate','pandas.ValueCounts','pandas.PivotTable','pandas.Melt','pandas.AddColumn','pandas.DropNA','pandas.FillNA','pandas.RenameColumns','pandas.HeadTail','pandas.Plot','pandas.CorrHeatmap','python.Exec','python.If','python.For','python.While','python.FileWriteCSV'].forEach(x=> has(x)&&acc.push(x));
+  } else if(t==='numpy.RandomNormal'){
+    ['pandas.Plot','sklearn.StandardScaler','sklearn.KMeans','sklearn.ClusterPlot','python.Exec','python.For','python.While'].forEach(x=> has(x)&&acc.push(x));
+  } else if(t.startsWith('sklearn.')){
+    ['sklearn.KMeans','sklearn.ClusterPlot','pandas.Plot','sklearn.StandardScaler','sklearn.TrainTestSplit','python.Exec'].forEach(x=> has(x)&&acc.push(x));
+  } else {
+    ['pandas.Plot','pandas.FilterRows','pandas.SelectColumns','python.Exec','python.FileReadText'].forEach(x=> has(x)&&acc.push(x));
+  }
+  // De-dup & limit
+  const seen=new Set(); const out=[]; for(const x of acc){ if(!seen.has(x)){ seen.add(x); out.push(x); if(out.length>=8) break; } }
+  return out;
+}
+
+function openQuickAdd(x, y, fromId){
+  const sWrap = quickAdd.querySelector('#qaSuggestedWrap');
+  const s = quickAdd.querySelector('#qaSuggested');
+  const all = quickAdd.querySelector('#qaAll');
+  const inp = quickAdd.querySelector('#qaSearch');
+  quickAdd.style.left = `${x}px`; quickAdd.style.top = `${y}px`;
+  const sugg = suggestionsForNode(fromId);
+  if(sugg.length){ sWrap.style.display='block'; s.innerHTML = sugg.map(buttonPill).join(''); } else { sWrap.style.display='none'; s.innerHTML=''; }
+  const types = allNodeTypes();
+  all.innerHTML = types.map(itemHtml).join('');
+  quickAdd.style.display = 'block';
+  const clickHandler = (ev)=>{
+    const btn = ev.target.closest('button[data-type]'); if(!btn) return; ev.preventDefault(); ev.stopPropagation();
+    const type = btn.getAttribute('data-type'); addAndConnect(type, fromId); closeQuickAdd();
+  };
+  quickAdd.addEventListener('click', clickHandler, { once: true });
+  inp.value=''; inp.oninput = ()=>{
+    const q = inp.value.toLowerCase(); const list = types.filter(t=> t.toLowerCase().includes(q) || nodeLabelOf(t).toLowerCase().includes(q)); all.innerHTML = list.map(itemHtml).join('');
+  };
+  // Close if clicking elsewhere
+  setTimeout(()=>{
+    const closeOnOutside = (e)=>{ if(!quickAdd.contains(e.target)){ closeQuickAdd(); document.removeEventListener('mousedown', closeOnOutside); } };
+    document.addEventListener('mousedown', closeOnOutside);
+  }, 0);
+}
+function closeQuickAdd(){ quickAdd.style.display='none'; }
+function addAndConnect(type, fromId){
+  const srcEl = document.querySelector(`[data-node-id="${fromId}"]`);
+  const rect = srcEl?.getBoundingClientRect(); const wrap = canvasWrap.getBoundingClientRect();
+  const x = (parseInt(srcEl?.style.left||'0')||0) + 280; const y = (parseInt(srcEl?.style.top||'0')||0);
+  const n = addNode(type, x, y);
+  state.edges = state.edges.filter(e=> !(e.from===fromId && e.to===n.id));
+  state.edges.push({ from: fromId, to: n.id });
+  selectNode(n.id); drawEdges(); refreshForms(); clearGhost();
+  state.pendingSrc = null;
+}
+
 // Selection helpers (for Delete-key removal)
 function selectNode(id){
   state.selectedNodeId = id;
@@ -74,15 +163,16 @@ function selectNode(id){
     if(el.dataset.nodeId === id){ el.classList.add('selected'); el.style.outline = '2px solid #1f6feb'; }
     else { el.classList.remove('selected'); el.style.outline = 'none'; }
   });
+  updatePreviewDock();
 }
-function clearSelection(){ state.selectedNodeId = null; document.querySelectorAll('.node').forEach(el=>{ el.classList.remove('selected'); el.style.outline = 'none'; }); }
+function clearSelection(){ state.selectedNodeId = null; document.querySelectorAll('.node').forEach(el=>{ el.classList.remove('selected'); el.style.outline = 'none'; }); updatePreviewDock(); }
 function deleteSelectedNode(){
   const id = state.selectedNodeId; if(!id) return;
   state.nodes = state.nodes.filter(n=> n.id !== id);
   state.edges = state.edges.filter(e=> e.from !== id && e.to !== id);
   if(state.lastPlotNodeId === id) state.lastPlotNodeId = null;
   state.selectedNodeId = null;
-  render();
+  render(); updatePreviewDock();
 }
 
 // Infer upstream column names statically (best-effort)
@@ -155,6 +245,22 @@ function computeUpstreamColumns(n){
     if(cur.type==='numpy.RandomNormal'){
       const cols = []; const count = parseInt(cur.params?.cols||'2')||2; const prefix = String(cur.params?.prefix||'x'); for(let i=1;i<=count;i++) cols.push(prefix + i); return cols;
     }
+    if(cur.type==='sklearn.TrainTestSplit'){
+      const cols = walk(up); return uniq([...cols, 'split']);
+    }
+    if(cur.type==='sklearn.StandardScaler'){
+      const cols = walk(up);
+      const inplace = String(cur.params?.inplace) !== 'false';
+      if(inplace) return cols;
+      const suffix = String(cur.params?.suffix||'_scaled');
+      // Heuristic: append suffixed versions for all columns we currently see
+      const suff = cols.map(c=> c + suffix);
+      return uniq([...cols, ...suff]);
+    }
+    // Python utility/control nodes are pass-through for columns
+    if(cur.type&&cur.type.startsWith('python.')){
+      return walk(up);
+    }
     // Fallback: propagate from upstream
     return walk(up);
   }
@@ -218,11 +324,35 @@ function bindForm(el, node){
       }catch(err){ setInfo('folder selection canceled'); }
     });
   }
+  // File chooser for python.FileReadText
+  const chooseFile = el.querySelector('.choose-file');
+  if(chooseFile){
+    chooseFile.addEventListener('click', async (e)=>{
+      e.preventDefault();
+      try{
+        if(window.showOpenFilePicker){
+          const [fileHandle] = await window.showOpenFilePicker({ multiple:false });
+          const file = await fileHandle.getFile();
+          const pathInput = el.querySelector('input[name="path"]');
+          if(pathInput){ pathInput.value = file.name; node.params.path = file.name; }
+        } else {
+          const input = document.createElement('input'); input.type='file'; input.style.display='none'; document.body.appendChild(input);
+          input.addEventListener('change', ()=>{
+            const f = input.files && input.files[0];
+            const pathInput = el.querySelector('input[name="path"]');
+            if(f && pathInput){ pathInput.value = f.name; node.params.path = f.name; }
+            input.remove();
+          }, { once:true }); input.click();
+        }
+      }catch{}
+    });
+  }
 }
 
 function createNodeEl(node){
   const def = registry.nodes.get(node.type);
   const el = document.createElement('div'); el.className = 'node'; el.style.left = node.x+'px'; el.style.top = node.y+'px'; el.dataset.nodeId = node.id;
+  const previewOpen = (node.type==='pandas.Plot');
   el.innerHTML = `
     <div class=\"head\"><span class=\"title\">${def.title || node.type}</span><span class=\"type\">${node.id}</span></div>
     <div class=\"ports\"><div class=\"port in\"></div><div class=\"port out\"></div></div>
@@ -230,7 +360,10 @@ function createNodeEl(node){
     <div style=\"display:flex; gap:6px; padding:6px 10px; border-top:1px solid #263041;\">
       <button class=\"node-run\" style=\"flex:1; padding:6px; background:#1f6feb; color:#fff; border:0; border-radius:6px; cursor:pointer\">▶ Run</button>
     </div>
-  <div class=\"preview\" id=\"prev-${node.id}\"><div class=\"empty\">No output yet</div></div>
+  <details class=\"preview\" id=\"prevwrap-${node.id}\" ${previewOpen?'open':''}>
+    <summary style=\"cursor:pointer; user-select:none; padding:6px 10px; font-size:12px; opacity:0.85\">Preview</summary>
+    <div id=\"prev-${node.id}\" style=\"padding:6px 10px 10px 10px\"><div class=\"empty\">No output yet</div></div>
+  </details>
   `;
   // Apply selected style if this is the selected node
   if(state.selectedNodeId === node.id){ el.classList.add('selected'); el.style.outline = '2px solid #1f6feb'; }
@@ -243,8 +376,12 @@ function createNodeEl(node){
   el.addEventListener('mousedown', (e)=>{ selectNode(node.id); e.stopPropagation(); });
   // Connect
   const outPort = el.querySelector('.port.out'); const inPort = el.querySelector('.port.in');
-  outPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); state.pendingSrc = node.id; outPort.classList.add('selected'); });
-  inPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); if(state.pendingSrc && state.pendingSrc!==node.id){ state.edges = state.edges.filter(e=> e.to!==node.id); state.edges.push({from: state.pendingSrc, to: node.id}); state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); drawEdges(); clearGhost(); refreshForms(); } });
+  outPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); state.pendingSrc = node.id; outPort.classList.add('selected');
+    // Show Quick Add near cursor
+    const rect = canvasWrap.getBoundingClientRect();
+    openQuickAdd(ev.clientX - rect.left + 10, ev.clientY - rect.top + 10, node.id);
+  });
+  inPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); if(state.pendingSrc && state.pendingSrc!==node.id){ state.edges = state.edges.filter(e=> e.to!==node.id); state.edges.push({from: state.pendingSrc, to: node.id}); state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); drawEdges(); clearGhost(); refreshForms(); closeQuickAdd(); } });
   bindForm(el, node);
   // Per-node Run
   el.querySelector('.node-run').addEventListener('click', async ()=>{
@@ -266,17 +403,45 @@ function topoSort(){
 
 function genCode(){
   const order = topoSort();
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")' ];
+  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")',
+    'def _fp_preview(df, nid):',
+    '    try:',
+    '        print(f"[[PREVIEW:{nid}:HEAD]]" + df.head().to_string())',
+    '        print(f"[[PREVIEW:{nid}:HEADHTML]]" + df.head().to_html())',
+    '    except Exception:',
+    '        pass',
+    '    try:',
+    '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
+    '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
+    '    except Exception:',
+    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
+  ];
   const lines = [...header]; const varOf = {}; const ctx = { srcVar: (node)=> varOf[upstreamOf(node)?.id], varOfId: (id)=> varOf[id], setLastPlotNode: (id)=> state.lastPlotNodeId=id };
-  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); } lines.push(`print("[[NODE:${n.id}:END]]")`); });
+  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
+    lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
+    lines.push(`print("[[NODE:${n.id}:END]]")`); });
   return lines.join('\n');
 }
 
 function genCodeUpTo(targetId){
   const order = topoSort(); const keep = new Set(); const backAdj = {}; state.edges.forEach(e=>{ (backAdj[e.to] ||= []).push(e.from); }); const stack = [targetId]; while(stack.length){ const u = stack.pop(); if(!u || keep.has(u)) continue; keep.add(u); (backAdj[u]||[]).forEach(v=> stack.push(v)); }
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")' ];
+  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")',
+    'def _fp_preview(df, nid):',
+    '    try:',
+    '        print(f"[[PREVIEW:{nid}:HEAD]]" + df.head().to_string())',
+    '        print(f"[[PREVIEW:{nid}:HEADHTML]]" + df.head().to_html())',
+    '    except Exception:',
+    '        pass',
+    '    try:',
+    '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
+    '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
+    '    except Exception:',
+    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
+  ];
   const lines = [...header]; const varOf = {}; const ctx = { srcVar: (node)=> varOf[upstreamOf(node)?.id], varOfId: (id)=> varOf[id], setLastPlotNode: (id)=> state.lastPlotNodeId=id };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); } lines.push(`print("[[NODE:${n.id}:END]]")`); });
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
+    lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
+    lines.push(`print("[[NODE:${n.id}:END]]")`); });
   return lines.join('\n');
 }
 
@@ -285,13 +450,98 @@ function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendC
 function addNode(type, x=80, y=80){ const def = registry.nodes.get(type); const n = { id: uid(), type, x, y, params: JSON.parse(JSON.stringify(def?.defaultParams||{})) }; state.nodes.push(n); const el = createNodeEl(n); nodesEl.appendChild(el); drawEdges(); return n; }
 
 function renderToolbar(){ toolbarEl.innerHTML = ''; const pkg = state.activePkg || registry.packages[0]?.name; state.activePkg = pkg; const list = registry.byPackage.get(pkg) || []; list.forEach(type=>{ const def = registry.nodes.get(type); const btn = document.createElement('button'); btn.textContent = '➕ ' + (def.title || type); btn.dataset.type = type; btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); }); toolbarEl.appendChild(btn); }); }
-function renderTabs(){ tabsBar.innerHTML = ''; registry.packages.forEach(p=>{ const b = document.createElement('button'); b.textContent = p.label || p.name; b.style.flex='1'; b.style.padding='6px'; b.style.background = (state.activePkg===p.name? '#263041':'#111824'); b.style.color='var(--text)'; b.style.border='1px solid #263041'; b.style.borderRadius='6px'; b.style.cursor='pointer'; b.addEventListener('click', ()=>{ state.activePkg=p.name; renderTabs(); renderToolbar(); }); tabsBar.appendChild(b); }); }
+function renderTabs(){
+  tabsBar.innerHTML = '';
+  // Keep Run All on the left
+  tabsBar.appendChild(globalRunBtn);
+  registry.packages.forEach(p=>{
+    const b = document.createElement('button');
+    b.textContent = p.label || p.name; b.style.flex='1'; b.style.padding='6px';
+    b.style.background = (state.activePkg===p.name? '#263041':'#111824');
+    b.style.color='var(--text)'; b.style.border='1px solid #263041'; b.style.borderRadius='6px'; b.style.cursor='pointer';
+    b.addEventListener('click', ()=>{ state.activePkg=p.name; renderTabs(); renderToolbar(); });
+    tabsBar.appendChild(b);
+  });
+}
 
 // WebSocket & streaming
-let ws; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> appendLog('[ws] connected'); ws.onclose = ()=> appendLog('[ws] closed'); ws.onmessage = ev => { const data = JSON.parse(ev.data); if (data.type === 'stream') { appendLog(data.content.text || ''); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ const tgt = document.getElementById('prev-' + (state.lastPlotNodeId||'')); if(tgt){ tgt.innerHTML = `<img src="data:image/png;base64,${d['image/png']}">`; } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); } }; }
+let ws; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> appendLog('[ws] connected'); ws.onclose = ()=> appendLog('[ws] closed'); ws.onmessage = ev => { const data = JSON.parse(ev.data); if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); // store preview
+        if(kind==='HEAD'){
+          state.preview.head.set(id, body);
+          const tgt = document.getElementById('prev-' + id);
+          if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } }
+        } else {
+          state.preview.desc.set(id, body);
+        }
+      }
+      // HTML previews
+  const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); if(n && n.type==='pandas.Plot'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } }
+      rest = rest.replace(re, '').replace(reHtml, '');
+      // Track node begin/end and accumulate plain text as fallback
+      const lines = String(rest).split(/\r?\n/);
+      for(const ln of lines){ if(!ln) continue;
+        let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){
+          state.stream.currentNodeId = mb[1];
+          // reset per-node preview state so only the latest remains
+          state.preview.head.delete(mb[1]);
+          state.preview.desc.delete(mb[1]);
+          state.preview.headHtml.delete(mb[1]);
+          state.preview.descHtml.delete(mb[1]);
+          state.stream.buffers.set(mb[1], '');
+          const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; }
+          continue; }
+        let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; }
+    const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); if(!(n && n.type==='pandas.Plot')){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); const tgt = document.getElementById('prev-' + cur); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } }
+        else { appendLog(ln); }
+      }
+      updatePreviewDock();
+  } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ const nid = (state.lastPlotNodeId||''); const tgt = document.getElementById('prev-' + nid); if(tgt){ const imgHtml = `<img style="margin-top:8px" src="data:image/png;base64,${d['image/png']}">`; const n = getNode(nid); if(n && n.type==='pandas.Plot'){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); const m = String(d['text/plain']).match(/^\[\[DOWNLOAD:([^:]+):CSV\]\]([\s\S]*)$/); if(m){ const id=m[1], csv=m[2]; const blob = new Blob([csv], { type:'text/csv' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href=url; a.download='data.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 2000); } } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } }; }
+
+// Small helper to lightly style pandas to_html tables to match the theme
+function styleTableHtml(html){
+  try{
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    const table = wrapper.querySelector('table');
+    if(table){
+      table.style.width = '100%';
+      table.style.borderCollapse = 'collapse';
+      table.querySelectorAll('th,td').forEach(cell=>{ cell.style.border='1px solid #263041'; cell.style.padding='4px 6px'; });
+      table.querySelectorAll('thead').forEach(t=> t.style.background = '#111824');
+      table.querySelectorAll('tbody tr:nth-child(even)').forEach(tr=> tr.style.background = '#0b1220');
+      table.style.color = 'var(--text)';
+      table.style.fontSize = '12px';
+      return wrapper.innerHTML;
+    }
+  }catch{}
+  return html;
+}
+
+// Combine stored previews into a node's preview area
+function updateNodePreview(id){
+  const tgt = document.getElementById('prev-' + id);
+  if(!tgt) return;
+  const n = getNode(id); if(n && n.type==='pandas.Plot'){ return; }
+  const hHtml = state.preview.headHtml.get(id);
+  const dHtml = state.preview.descHtml.get(id);
+  const hTxt = state.preview.head.get(id);
+  const dTxt = state.preview.desc.get(id);
+  const headPart = hHtml ? styleTableHtml(hHtml) : (hTxt ? `<pre style="margin:0; white-space:pre-wrap">${hTxt.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>` : '');
+  const descPart = dHtml ? styleTableHtml(dHtml) : (dTxt ? `<pre style="margin:0; white-space:pre-wrap">${dTxt.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>` : '');
+  if(!headPart && !descPart){ return; }
+  // Preserve any existing plot image by re-adding after grid
+  const oldImg = tgt.querySelector('img');
+  tgt.innerHTML = `
+    <div class="node-preview-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:8px; align-items:start;">
+      <div>${headPart || ''}</div>
+      <div>${descPart || ''}</div>
+    </div>
+  `;
+  if(oldImg){ tgt.appendChild(oldImg); }
+}
 
 // Background events
-canvasWrap.addEventListener('click', ()=>{ state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); clearGhost(); clearSelection(); });
+canvasWrap.addEventListener('click', ()=>{ state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); clearGhost(); clearSelection(); closeQuickAdd(); });
 window.addEventListener('resize', drawEdges); window.addEventListener('scroll', drawEdges, { passive: true }); canvasWrap.addEventListener('scroll', drawEdges, { passive: true }); window.addEventListener('mousemove', (e)=>{ if(!state.pendingSrc) return; const rect = edgesSvg.getBoundingClientRect(); setGhost(e.clientX - rect.left, e.clientY - rect.top); });
 
 // Delete key to remove selected node (tab)
@@ -305,7 +555,7 @@ window.addEventListener('keydown', (e)=>{
 // Sidebar buttons
 document.getElementById('installBtn').addEventListener('click', async ()=>{ statusEl.textContent='installing...'; appendLog('Installing requirements...'); const res = await fetch('/bootstrap', { method:'POST' }); const js = await res.json().catch(()=>({})); appendLog(js.output ? js.output : JSON.stringify(js)); statusEl.textContent='idle'; });
 document.getElementById('restartBtn').addEventListener('click', async ()=>{ appendLog('[kernel] restarting...'); statusEl.textContent='restarting...'; try{ const res = await fetch('/restart', { method:'POST' }); const js = await res.json().catch(()=>({})); appendLog('[kernel] restarted ' + JSON.stringify(js)); }catch(e){ appendLog('[kernel] restart error'); } statusEl.textContent='idle'; try{ if(ws) ws.close(); }catch{} ensureWS(); });
-document.getElementById('sampleBtn').addEventListener('click', ()=>{ state.nodes=[]; state.edges=[]; state.nextId=1; const n1 = addNode('pandas.ReadCSV', 60, 60); const n2 = addNode('pandas.FilterRows', 340, 80); const n3 = addNode('pandas.Plot', 620, 100); state.edges.push({from:n1.id,to:n2.id},{from:n2.id,to:n3.id}); render(); });
+document.getElementById('sampleBtn').addEventListener('click', ()=>{ state.nodes=[]; state.edges=[]; state.nextId=1; const n1 = addNode('pandas.ReadCSV', 60, 60); const n2 = addNode('pandas.FilterRows', 340, 80); const n3 = addNode('pandas.Plot', 620, 100); state.edges.push({from:n1.id,to:n2.id},{from:n2.id,to:n3.id}); render(); updatePreviewDock(); });
 
 // Package loading
 async function loadPackages(){ const res = await fetch('/api/packages'); const list = await res.json(); registry.packages = list.map(x=> ({name:x.name, label:x.label})); for(const p of list){ try{ const mod = await import(`/pkg/${p.name}/${p.entry}`); if(mod && typeof mod.register==='function'){ const reg = { node(def){ if(!def || !def.id) return; registry.nodes.set(def.id, def); const pkgName = p.name; if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []); registry.byPackage.get(pkgName).push(def.id); } }; mod.register(reg); } }catch(e){ appendLog(`[pkg:${p.name}] load error`); } } state.activePkg = registry.packages[0]?.name || null; renderTabs(); renderToolbar(); document.getElementById('sampleBtn').click(); }

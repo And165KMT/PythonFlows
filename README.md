@@ -1,4 +1,4 @@
-# FlowPython MVP (Local 1-sheet)
+# PythonFlows
 
 This is a minimal local-first prototype:
 - Backend: FastAPI + Jupyter kernel via jupyter_client

@@ -79,6 +79,7 @@ export function register(reg){
     defaultParams: { 
       kind:'bar', x:'city', y:'temp',
       color:'#1f77b4', linewidth:'2', marker:'', alpha:'1.0',
+      colorBy:'', cmap:'', s:'',
       legend:true, grid:false, rot:'0',
       title:'', xlabel:'', ylabel:'',
       figsizeW:'6', figsizeH:'4', dpi:'100',
@@ -90,6 +91,7 @@ export function register(reg){
       const cols = ui.getUpstreamColumns(node);
       const optsX = cols.length? cols.map(c=>`<option ${v.x===c?'selected':''}>${c}</option>`).join('') : `<option>${v.x||''}</option>`;
       const optsY = cols.length? cols.map(c=>`<option ${v.y===c?'selected':''}>${c}</option>`).join('') : `<option>${v.y||''}</option>`;
+      const optsC = [''].concat(cols).map(c=>`<option ${v.colorBy===c?'selected':''}>${c}</option>`).join('');
       return `
       <label>kind</label>
       <select name="kind">
@@ -97,9 +99,43 @@ export function register(reg){
         <option ${v.kind==='line'?'selected':''}>line</option>
         <option ${v.kind==='scatter'?'selected':''}>scatter</option>
         <option ${v.kind==='hist'?'selected':''}>hist</option>
+        <option ${v.kind==='area'?'selected':''}>area</option>
+        <option ${v.kind==='box'?'selected':''}>box</option>
+        <option ${v.kind==='kde'?'selected':''}>kde</option>
+        <option ${v.kind==='hexbin'?'selected':''}>hexbin</option>
       </select>
       <label>x</label><select name="x">${optsX}</select>
       <label>y</label><select name="y">${optsY}</select>
+
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer; user-select:none">Color & Style</summary>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div>
+            <label>color</label><input name="color" value="${v.color||''}" placeholder="#1f77b4">
+          </div>
+          <div>
+            <label>linewidth</label><input name="linewidth" type="number" step="0.1" value="${v.linewidth||''}">
+          </div>
+          <div>
+            <label>marker</label>
+            <select name="marker">
+              ${['','o','s','^','v','D','x','+','*','.'].map(m=>`<option value="${m}" ${v.marker===m?'selected':''}>${m||'(none)'}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}">
+          </div>
+          <div>
+            <label>color by (column)</label><select name="colorBy">${optsC}</select>
+          </div>
+          <div>
+            <label>cmap</label><input name="cmap" value="${v.cmap||''}" placeholder="tab10">
+          </div>
+          <div>
+            <label>size (scatter)</label><input name="s" type="number" step="1" value="${v.s||''}" placeholder="20">
+          </div>
+        </div>
+      </details>
 
       <details style="margin-top:8px">
         <summary style="cursor:pointer; user-select:none">Advanced</summary>
@@ -167,6 +203,9 @@ export function register(reg){
       const linewidth = v.linewidth||'';
       const marker = v.marker||'';
       const alpha = v.alpha||'';
+  const colorBy = v.colorBy||'';
+  const cmap = (v.cmap||'');
+  const s = v.s||'';
       const legend = String(v.legend) !== 'false';
       const grid = String(v.grid) === 'true';
       const rot = v.rot||'';
@@ -189,21 +228,74 @@ export function register(reg){
       if(x) args.push(`x='${x}'`);
       if(y) args.push(`y='${y}'`);
       args.push(`ax=ax`);
-      if(color) args.push(`color='${color}'`);
+      if(color && !colorBy) args.push(`color='${color}'`);
       if(linewidth) args.push(`linewidth=${parseFloat(linewidth)}`);
       if(marker) args.push(`marker='${marker}'`);
       if(alpha) args.push(`alpha=${parseFloat(alpha)}`);
       if(rot) args.push(`rot=${parseInt(rot)}`);
-      if(kind==='hist' && bins) args.push(`bins=${parseInt(bins)}`);
+  if(kind==='hist' && bins) args.push(`bins=${parseInt(bins)}`);
+  if(kind==='hexbin') args.push(`gridsize=25`);
       if((kind==='bar' || kind==='hist') && stacked) args.push(`stacked=True`);
       if(legend!==undefined) args.push(`legend=${legend? 'True':'False'}`);
-      lines.push(`${src}.plot(${args.join(', ')})`);
+      if(kind==='scatter' && colorBy){
+        const scatArgs = [
+          `x='${x}'`,`y='${y}'`,`ax=ax`
+        ];
+        if(s) scatArgs.push(`s=${parseFloat(s)}`);
+        if(alpha) scatArgs.push(`alpha=${parseFloat(alpha)}`);
+        if(cmap) scatArgs.push(`cmap='${cmap}'`);
+        scatArgs.push(`c=${src}['${colorBy}']`);
+        lines.push(`${src}.plot(kind='scatter', ${scatArgs.join(', ')})`);
+      } else {
+        if(colorBy){ args.push(`c=${src}['${colorBy}']`); if(cmap) args.push(`cmap='${cmap}'`); }
+        lines.push(`${src}.plot(${args.join(', ')})`);
+      }
       if(title) lines.push(`ax.set_title(r'''${title}''')`);
       if(xlabel) lines.push(`ax.set_xlabel(r'''${xlabel}''')`);
       if(ylabel) lines.push(`ax.set_ylabel(r'''${ylabel}''')`);
       if(grid) lines.push(`ax.grid(True)`);
       if(xlimMin!=='' && xlimMax!=='') lines.push(`ax.set_xlim(${parseFloat(xlimMin)}, ${parseFloat(xlimMax)})`);
       if(ylimMin!=='' && ylimMax!=='') lines.push(`ax.set_ylim(${parseFloat(ylimMin)}, ${parseFloat(ylimMax)})`);
+      lines.push(`plt.tight_layout()`);
+      lines.push(`from IPython.display import display`);
+      lines.push(`display(plt.gcf())`);
+      return lines;
+    }
+  });
+
+  // CorrHeatmap
+  reg.node({
+    id: 'pandas.CorrHeatmap', title: 'CorrHeatmap',
+    defaultParams: { method:'pearson', cmap:'coolwarm', annot:true, figsizeW:'6', figsizeH:'4', dpi:'100' },
+    form(node, ui){ const v=node.params||(node.params={}); return `
+      <label>method</label><select name="method"><option ${v.method==='pearson'?'selected':''}>pearson</option><option ${v.method==='kendall'?'selected':''}>kendall</option><option ${v.method==='spearman'?'selected':''}>spearman</option></select>
+      <label>cmap</label><input name="cmap" value="${v.cmap||'coolwarm'}">
+      <label>annot</label><select name="annot"><option value="true" ${String(v.annot)!=='false'?'selected':''}>true</option><option value="false" ${String(v.annot)==='false'?'selected':''}>false</option></select>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+        <div><label>figsize W</label><input name="figsizeW" type="number" step="0.5" value="${v.figsizeW||'6'}"></div>
+        <div><label>figsize H</label><input name="figsizeH" type="number" step="0.5" value="${v.figsizeH||'4'}"></div>
+      </div>
+      <label>dpi</label><input name="dpi" type="number" step="1" value="${v.dpi||'100'}">
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v=node.params||{}; ctx.setLastPlotNode(node.id);
+      const figsizeW = parseFloat(v.figsizeW||'6')||6; const figsizeH = parseFloat(v.figsizeH||'4')||4; const dpi=parseInt(v.dpi||'100')||100;
+      const method = (v.method||'pearson'); const cmap=(v.cmap||'coolwarm'); const annot = String(v.annot)!=='false';
+      const lines=[];
+      lines.push(`fig = plt.figure(figsize=(${figsizeW}, ${figsizeH}), dpi=${dpi})`);
+      lines.push(`ax = plt.gca()`);
+      lines.push(`_corr = ${src}.select_dtypes(include='number').corr(method='${method}')`);
+      // basic heatmap using matplotlib (no seaborn dependency)
+      lines.push(`im = ax.imshow(_corr, cmap='${cmap}')`);
+      lines.push(`ax.set_xticks(range(len(_corr.columns)))`);
+      lines.push(`ax.set_xticklabels(_corr.columns, rotation=45, ha='right')`);
+      lines.push(`ax.set_yticks(range(len(_corr.index)))`);
+      lines.push(`ax.set_yticklabels(_corr.index)`);
+      lines.push(`fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)`);
+      lines.push(`for i in range(len(_corr.index)):`);
+      lines.push(`    for j in range(len(_corr.columns)):`);
+      lines.push(`        val = _corr.iloc[i, j]`);
+      lines.push(`        ax.text(j, i, f"{val:.2f}", ha='center', va='center', color='white' if abs(val)>0.5 else 'black') if ${annot? 'True':'False'} else None`);
       lines.push(`plt.tight_layout()`);
       lines.push(`from IPython.display import display`);
       lines.push(`display(plt.gcf())`);
