@@ -7,15 +7,18 @@
     :root {
       --bg: #0e1116; --panel: #161b22; --text: #e6edf3; --sub: #9ba3af;
       --accent: #1f6feb; --ok: #2ea043; --warn: #d29922; --err: #f85149;
+      --right-w: 380px;
     }
     html, body { height: 100%; }
     body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     header { padding: 12px 16px; background: #0b0f14; border-bottom: 1px solid #1f2329; display:flex; align-items:center; gap:12px; }
     header h1 { margin: 0; font-size: 18px; }
-    #app { display: grid; grid-template-columns: 260px 1fr 380px; height: calc(100% - 53px); }
+  #app { display: grid; grid-template-columns: 260px 1fr var(--right-w); height: calc(100% - 53px); }
     #sidebar { background: var(--panel); border-right:1px solid #1f2329; padding: 12px; }
     #canvasWrap { position: relative; background: #0c1016; }
-    #right { background: var(--panel); border-left:1px solid #1f2329; display:flex; flex-direction:column; }
+  #right { background: var(--panel); border-left:1px solid #1f2329; display:flex; flex-direction:column; position: relative; }
+  #rightResizer { position:absolute; left:-3px; top:0; bottom:0; width:6px; cursor: col-resize; background: transparent; }
+  #rightResizer:hover { background: rgba(255,255,255,0.05); }
     #toolbar button { width: 100%; margin-bottom: 8px; padding: 8px; background:#111824; color:var(--text); border:1px solid #263041; border-radius:6px; cursor:pointer; text-align:left; }
     #toolbar button:hover { background:#152032; }
     #actions { display:flex; gap:8px; margin-top:12px; }
@@ -35,8 +38,9 @@
     .port { width:12px; height:12px; border-radius:50%; background: #44546a; border:1px solid #2a3445; cursor: crosshair; box-shadow: 0 0 0 4px rgba(0,0,0,0); transition: box-shadow .1s; }
     .port.selected { box-shadow: 0 0 0 4px rgba(31,111,235,0.35); }
     .ports { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; }
-    .port.out { background: #1f6feb; }
-    .port.in { background: #2ea043; }
+  /* Colors: out=blue, in=green (start from blue out, connect to green in) */
+  .port.out { background: #1f6feb; }
+  .port.in { background: #2ea043; }
     .preview { border-top:1px solid #263041; padding:8px 10px; max-height:140px; overflow:auto; background:#0b0f14; }
     .preview img { max-width:100%; height:auto; display:block; }
     /* Edges */
@@ -45,6 +49,12 @@
     /* Right panel */
     #log { white-space: pre-wrap; background: #0b0f14; color: #a7f3d0; padding: 8px; height: 280px; overflow: auto; border-top:1px solid #1f2329; }
     #genCode { background:#0b0f14; color:#c9d1d9; border:0; border-top:1px solid #1f2329; padding:10px; font-family: ui-monospace, Consolas, monospace; height:100%; overflow:auto; }
+
+  /* Right panel tabs */
+  .tabs { display:inline-flex; background:#111824; border:1px solid #263041; border-radius:8px; overflow:hidden; }
+  .tab { padding:6px 12px; background:transparent; color:var(--text); border:0; cursor:pointer; font-weight:600; font-size:12px; }
+  .tab:hover { background:#152032; }
+  .tab.active { background: var(--accent); color:#fff; }
   </style>
 </head>
 <body>
@@ -66,13 +76,31 @@
       <div id="nodes"></div>
     </section>
     <aside id="right">
+  <div id="rightResizer" title="Drag to resize"></div>
       <div style="padding:10px; display:flex; align-items:center; gap:8px; border-bottom:1px solid #1f2329;">
-        <strong>Console</strong>
-        <span id="status" style="margin-left:auto; font-size:12px; color:var(--sub)">idle</span>
+        <div id="rightTabs" class="tabs" role="tablist" aria-label="Right Panel Tabs">
+          <button id="tabCode" class="tab active" role="tab" aria-selected="true" aria-controls="rightCode">Code</button>
+          <button id="tabVars" class="tab" role="tab" aria-selected="false" aria-controls="rightVars">Variables</button>
+        </div>
+        <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+          <label for="previewMode" style="font-size:12px; color:var(--sub)">Preview</label>
+          <select id="previewMode" style="background:#0b1018; color:var(--text); border:1px solid #2a3445; border-radius:6px; padding:4px 6px; font-size:12px;">
+            <option value="all">All</option>
+            <option value="plots" selected>Plots</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+        <span id="status" style="font-size:12px; color:var(--sub)">idle</span>
       </div>
-      <div id="log"></div>
-      <div style="padding:10px; border-top:1px solid #1f2329; font-weight:600">Generated code</div>
-      <pre id="genCode"></pre>
+      <div id="rightCode">
+        <div id="log"></div>
+        <div style="padding:10px; border-top:1px solid #1f2329; font-weight:600">Generated code</div>
+        <pre id="genCode"></pre>
+      </div>
+      <div id="rightVars" style="display:none; height:100%; overflow:auto;">
+        <div style="padding:10px; border-bottom:1px solid #1f2329; font-weight:600">Workspace Variables</div>
+        <div id="varsWrap" style="padding:10px"></div>
+      </div>
     </aside>
   </div>
 

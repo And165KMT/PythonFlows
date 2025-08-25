@@ -20,3 +20,22 @@ Requirements (Windows, cmd.exe):
 Notes:
 License:
 - This repository is released under FlowPython Community Edition License (FP-CEL). Individuals are free to use; companies must contact us for commercial use or for more than one sheet. See LICENSE.md.
+
+## Quick Guide (New Features)
+
+- Variable template embedding
+	- In any string field, `${varName}` is replaced with the current kernel global variable `varName`.
+	- Supported examples: pandas.ReadCSV path/dir, inline CSV content, Python FileReadText path/inline, FileWriteCSV path.
+
+- Unified expression evaluation
+	- Python-side expressions use `_fp_eval()` which evaluates against kernel globals with optional locals (e.g., `df`).
+	- `python.Math` accepts expressions like `df["a"] + alpha`.
+
+- Variables inspector (right pane)
+	- Switch with “Variables” button; shows a MATLAB-like table of Name/Type/Value.
+	- Automatically refreshes after runs. When visible, you can click Variables again to refresh.
+
+- Global variables
+	- `python.SetGlobal`: assign multiple lines `name = expr`.
+	- `python.GetGlobal`: import a chosen global into the flow as a DataFrame row.
+	- Most forms include a “Load Variables” helper to click-insert variable names.

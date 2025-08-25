@@ -12,6 +12,7 @@ import queue
 import subprocess
 import sys
 from typing import Optional
+import time
 
 nest_asyncio.apply()
 
@@ -26,6 +27,8 @@ app.add_middleware(
 
 kernel_manager: Optional[KernelManager] = None
 kc = None  # type: ignore
+# Gate to coordinate exclusive iopub reads between websocket stream and API calls
+iopub_gate = asyncio.Lock()
 
 # Static frontend dir
 static_dir = Path(__file__).resolve().parent.parent / "frontend"
@@ -73,6 +76,77 @@ async def run_graph(body: dict):
         return JSONResponse({"error": "kernel not ready"}, status_code=503)
     msg_id = kc.execute(code)
     return {"execId": exec_id, "msgId": msg_id}
+
+@app.get("/api/variables")
+async def list_variables():
+    """Execute a short snippet on the kernel to list global variables and return as JSON."""
+    if kc is None:
+        return JSONResponse({"error": "kernel not ready"}, status_code=503)
+    code = (
+        "import json, types\n"
+        "def __fp_list_vars():\n"
+        "    out=[]\n"
+        "    for k,v in list(globals().items()):\n"
+        "        if str(k).startswith('_'):\n"
+        "            continue\n"
+        "        # Skip modules and callables early to avoid heavy repr()\n"
+        "        try:\n"
+        "            if isinstance(v, types.ModuleType) or callable(v):\n"
+        "                continue\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        try:\n"
+        "            t = type(v).__name__\n"
+        "        except Exception:\n"
+        "            t = 'unknown'\n"
+        "        try:\n"
+        "            r = repr(v)[:200]\n"
+        "        except Exception:\n"
+        "            r = '<unrepr>'\n"
+        "        html = None\n"
+        "        try:\n"
+        "            if t == 'DataFrame':\n"
+        "                _df = v.head(5)\n"
+        "                try:\n"
+        "                    _df = _df.iloc[:, :4]\n"
+        "                except Exception:\n"
+        "                    pass\n"
+        "                html = _df.to_html(index=False, border=0)\n"
+        "        except Exception:\n"
+        "            html = None\n"
+        "        out.append({'name': str(k), 'type': t, 'repr': r, 'html': html})\n"
+        "    print('[[VARS]]'+json.dumps(out))\n"
+        "__fp_list_vars()\n"
+    )
+    vars_json = None
+    async with iopub_gate:
+        msg_id = kc.execute(code)
+        # Wait for output related to this execution
+        deadline = time.time() + 3.0
+        try:
+            while time.time() < deadline:
+                try:
+                    msg = kc.get_iopub_msg(timeout=0.2)
+                except queue.Empty:
+                    continue
+                # Only consider messages for our execution
+                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+                mtype = msg.get("header", {}).get("msg_type")
+                content = msg.get("content", {})
+                if mtype == "stream" and content.get("text", "").startswith("[[VARS]]"):
+                    payload = content.get("text", "")[8:]
+                    try:
+                        vars_json = json.loads(payload)
+                    except Exception:
+                        vars_json = []
+                    # We have the payload; return early to reduce latency
+                    break
+                elif mtype == "status" and content.get("execution_state") == "idle":
+                    break
+        except Exception:
+            pass
+    return {"variables": vars_json or []}
 
 @app.get("/health")
 async def health():
@@ -127,6 +201,10 @@ async def ws_stream(ws: WebSocket):
             try:
                 if kc is None:
                     await asyncio.sleep(0.1)
+                    continue
+                # If another endpoint is consuming iopub exclusively, wait
+                if iopub_gate.locked():
+                    await asyncio.sleep(0.05)
                     continue
                 msg = kc.get_iopub_msg(timeout=0.1)
             except queue.Empty:

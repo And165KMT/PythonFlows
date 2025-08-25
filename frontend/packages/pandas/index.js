@@ -22,14 +22,15 @@ export function register(reg){
     code(node, ctx){
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const seg=[];
-      if(node.params.mode==='path' && node.params.path){ seg.push(`${v} = pd.read_csv(r'''${node.params.path}''')`); }
+      if(node.params.mode==='path' && node.params.path){ seg.push(`${v} = pd.read_csv(_fp_render(r'''${node.params.path}'''))`); }
       else if(node.params.mode==='folder' && node.params.dir){
-        seg.push(`_files = sorted(glob.glob(r'''${node.params.dir}/*.csv'''))`);
+        seg.push(`_dir = _fp_render(r'''${node.params.dir}''')`);
+        seg.push(`_files = sorted(glob.glob(_dir+('/' if not _dir.endswith('/') else '')+'*.csv'))`);
         seg.push(`_frames = [pd.read_csv(_f) for _f in _files]`);
         seg.push(`${v} = pd.concat(_frames, ignore_index=True) if _frames else pd.DataFrame()`);
       } else {
         const content = (node.params.inline||'').replace(/`/g,'');
-        seg.push(`_csv = io.StringIO(r'''${content}''')`);
+        seg.push(`_csv = io.StringIO(_fp_render(r'''${content}'''))`);
         seg.push(`${v} = pd.read_csv(_csv)`);
       }
       seg.push(`print(${v}.head().to_string())`);
@@ -57,8 +58,8 @@ export function register(reg){
   reg.node({
     id: 'pandas.FilterRows', title:'FilterRows',
     defaultParams: { expr:'temp >= 30' },
-    form(node){ const v=node.params||(node.params={expr:''}); return `<label>pandas.query()</label><input name=expr value="${v.expr}">`; },
-    code(node, ctx){ const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); return [`${v} = ${src}.query(r'''${node.params.expr||''}''')`,`print(${v}.head().to_string())`]; }
+  form(node){ const v=node.params||(node.params={expr:''}); return `<label>pandas.query()</label><input name=expr value="${v.expr}">`; },
+  code(node, ctx){ const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); return [`${v} = ${src}.query(_fp_render(r'''${node.params.expr||''}'''))`,`print(${v}.head().to_string())`]; }
   });
 
   // GroupByAggregate
@@ -250,9 +251,9 @@ export function register(reg){
         if(colorBy){ args.push(`c=${src}['${colorBy}']`); if(cmap) args.push(`cmap='${cmap}'`); }
         lines.push(`${src}.plot(${args.join(', ')})`);
       }
-      if(title) lines.push(`ax.set_title(r'''${title}''')`);
-      if(xlabel) lines.push(`ax.set_xlabel(r'''${xlabel}''')`);
-      if(ylabel) lines.push(`ax.set_ylabel(r'''${ylabel}''')`);
+  if(title) lines.push(`ax.set_title(_fp_render(r'''${title}'''))`);
+  if(xlabel) lines.push(`ax.set_xlabel(_fp_render(r'''${xlabel}'''))`);
+  if(ylabel) lines.push(`ax.set_ylabel(_fp_render(r'''${ylabel}'''))`);
       if(grid) lines.push(`ax.grid(True)`);
       if(xlimMin!=='' && xlimMax!=='') lines.push(`ax.set_xlim(${parseFloat(xlimMin)}, ${parseFloat(xlimMax)})`);
       if(ylimMin!=='' && ylimMax!=='') lines.push(`ax.set_ylim(${parseFloat(ylimMin)}, ${parseFloat(ylimMax)})`);
@@ -491,8 +492,8 @@ export function register(reg){
       const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const newcol = (node.params?.newcol||'new').replace(/`/g,'');
       const expr = (node.params?.expr||'').replace(/`/g,'');
-      if(!expr) return [ `${v} = ${src}`, `print(${v}.head().to_string())` ];
-      return [ `${v} = ${src}.copy()`, `${v}['${newcol}'] = ${src}.eval(r'''${expr}''')`, `print(${v}.head().to_string())` ];
+  if(!expr) return [ `${v} = ${src}`, `print(${v}.head().to_string())` ];
+  return [ `${v} = ${src}.copy()`, `${v}['${newcol}'] = ${src}.eval(_fp_render(r'''${expr}'''))`, `print(${v}.head().to_string())` ];
     }
   });
 }
