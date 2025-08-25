@@ -496,4 +496,65 @@ export function register(reg){
   return [ `${v} = ${src}.copy()`, `${v}['${newcol}'] = ${src}.eval(_fp_render(r'''${expr}'''))`, `print(${v}.head().to_string())` ];
     }
   });
+
+  // Merge (integrate/join with another DataFrame)
+  reg.node({
+    id: 'pandas.Merge', title: 'Merge',
+    defaultParams: { how: 'inner', on: '', left_on: '', right_on: '', with: 'global', rhs: 'df2', path: '' },
+    form(node, ui){
+      const v=node.params||(node.params={});
+      const cols = ui.getUpstreamColumns(node) || [];
+      const opts = [''].concat(cols).map(c=>`<option ${v.on===c?'selected':''}>${c}</option>`).join('');
+      const optsL = [''].concat(cols).map(c=>`<option ${v.left_on===c?'selected':''}>${c}</option>`).join('');
+      return `
+        <label>how</label>
+        <select name="how">
+          <option ${v.how==='inner'?'selected':''}>inner</option>
+          <option ${v.how==='left'?'selected':''}>left</option>
+          <option ${v.how==='right'?'selected':''}>right</option>
+          <option ${v.how==='outer'?'selected':''}>outer</option>
+        </select>
+        <label>on (same column in both)</label>
+        <select name="on">${opts}</select>
+        <div style="font-size:12px; opacity:0.8;">or use left_on/right_on</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+          <div><label>left_on</label><select name="left_on">${optsL}</select></div>
+          <div><label>right_on</label><input name="right_on" value="${v.right_on||''}" placeholder="column name on RHS"></div>
+        </div>
+        <label>merge target</label>
+        <select name="with">
+          <option value="global" ${v.with!=='csv'?'selected':''}>global DataFrame variable</option>
+          <option value="csv" ${v.with==='csv'?'selected':''}>CSV file (path)</option>
+        </select>
+        ${v.with==='csv' ? `
+          <label>path</label>
+          <input name="path" value="${v.path||''}" placeholder="C:\\data\\other.csv">
+        ` : `
+          <label>global variable name</label>
+          <input name="rhs" value="${v.rhs||'df2'}" placeholder="df2">
+          <div style="font-size:12px; opacity:0.8;">変数は Python カーネルのグローバルから参照します</div>
+        `}
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const how=(node.params?.how||'inner');
+      const on=(node.params?.on||'');
+      const left_on=(node.params?.left_on||'');
+      const right_on=(node.params?.right_on||'');
+      const mode=(node.params?.with==='csv')?'csv':'global';
+      const rhsName=(node.params?.rhs||'df2').replace(/`/g,'');
+      const path=(node.params?.path||'').replace(/`/g,'');
+      const args=[]; if(on) args.push(`on='${on}'`); if(left_on) args.push(`left_on='${left_on}'`); if(right_on) args.push(`right_on='${right_on}'`); args.push(`how='${how}'`);
+      const lines=[`${v} = ${src}`];
+      if(mode==='csv'){
+        lines.push(`__rhs = pd.read_csv(_fp_render(r'''${path}'''))`);
+      } else {
+        lines.push(`__rhs = globals().get(r'''${rhsName}''', None)`);
+      }
+      lines.push(`try:\n  ${v} = ${v}.merge(__rhs, ${args.join(', ')})\nexcept Exception as _e:\n  print('MERGE_ERROR:', _e); pass`);
+      lines.push(`print(${v}.head().to_string())`);
+      return lines;
+    }
+  });
 }

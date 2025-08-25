@@ -83,6 +83,14 @@ export function computeUpstreamColumns(n){
       return uniq([...cols, ...suff]);
     }
     if(cur.type && cur.type.startsWith('python.')){
+      // For python.Math, include its output column name alongside upstream columns
+      if(cur.type==='python.Math'){
+        const cols = walk(up);
+        const out = String(cur.params?.out||'result').trim();
+        const uniqSet = new Set(cols);
+        if(out && !uniqSet.has(out)) cols.push(out);
+        return cols;
+      }
       return walk(up);
     }
     return walk(up);
@@ -98,7 +106,7 @@ export function suggestionsForNode(fromId){
   const has = (id)=> registry.nodes.has(id);
   const acc = [];
   if(t.startsWith('pandas.')){
-    ['pandas.SelectColumns','pandas.FilterRows','pandas.SortValues','pandas.GroupByAggregate','pandas.ValueCounts','pandas.PivotTable','pandas.Melt','pandas.AddColumn','pandas.DropNA','pandas.FillNA','pandas.RenameColumns','pandas.HeadTail','pandas.Plot','pandas.CorrHeatmap','python.Exec','python.If','python.For','python.While','python.FileWriteCSV','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
+    ['pandas.SelectColumns','pandas.FilterRows','pandas.SortValues','pandas.GroupByAggregate','pandas.ValueCounts','pandas.PivotTable','pandas.Melt','pandas.AddColumn','pandas.DropNA','pandas.FillNA','pandas.RenameColumns','pandas.HeadTail','pandas.Merge','pandas.Plot','pandas.CorrHeatmap','python.Exec','python.If','python.For','python.While','python.FileWriteCSV','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   } else if(t==='numpy.RandomNormal'){
     ['pandas.Plot','sklearn.StandardScaler','sklearn.KMeans','sklearn.ClusterPlot','python.Exec','python.For','python.While','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   } else if(t.startsWith('sklearn.')){

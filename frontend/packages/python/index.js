@@ -4,23 +4,24 @@ export function register(reg){
   // --- Globals: Set multiple kernel-level variables ---
   reg.node({
     id: 'python.SetGlobal', title: 'SetGlobal',
-    defaultParams: { assigns: 'alpha = 1\nbeta = 2.5\nname = "flow"' },
+    defaultParams: { name: 'alpha', value: '1' },
     form(node){ const v=node.params||(node.params={}); return `
-      <label>assignments (one per line, name = expr)</label>
-      <textarea name="assigns" placeholder="x = 10\nscale = 1.2\nflag = True">${v.assigns||''}</textarea>
-      <div style="display:flex; align-items:center; gap:6px; margin-top:6px;">
-        <button class="load-vars" type="button">Load Variables</button>
-        <span style="font-size:12px; opacity:0.8;">click to insert</span>
-      </div>
-      <div class="vars-list" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;"></div>
+      <label>name</label>
+      <input name="name" value="${v.name||'alpha'}" placeholder="alpha">
+      <label>value (Python expr)</label>
+      <input name="value" value="${(v.value||'').replace(/"/g,'&quot;')}" placeholder="1 or 'text' or math.pi">
       <div style="font-size:12px; opacity:0.8; margin-top:6px;">Allowed: + - * / **, abs/round/min/max/pow, math.*</div>
     `; },
-    code(node){
+    code(node, ctx){
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const assigns = String(node.params?.assigns||'').replace(/`/g,'');
+      const name = String(node.params?.name||'').replace(/`/g,'').trim();
+      const val = String(node.params?.value||'').replace(/`/g,'');
+      const line = name ? `${name} = ${val}` : '';
+      const src = ctx.srcVar(node);
       return [
-        `${v} = _fp_set_globals(r'''${assigns}''')`,
-        `print(${v}.head().to_string())`
+        `_ = _fp_set_globals(r'''${line}''')`,
+        `${v} = ${src ? src : 'None'}`,
+        `print(f"[SetGlobal] ${name} := ${val}")`
       ];
     }
   });
@@ -28,59 +29,89 @@ export function register(reg){
   // --- Math: evaluate expression and store into a new column ---
   reg.node({
     id: 'python.Math', title: 'Math',
-    defaultParams: { out: 'result', expr: 'df["a"] + df["b"]' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>output column</label>
-      <input name="out" value="${v.out||'result'}" placeholder="result">
-      <label>expression (Python, uses df & globals)</label>
-      <input name="expr" value="${(v.expr||'').replace(/"/g,'&quot;')}" placeholder='df["a"] + df["b"]'>
-      <div style="display:flex; align-items:center; gap:6px; margin-top:6px;">
-        <button class="load-vars" type="button">Load Variables</button>
-        <span style="font-size:12px; opacity:0.8;">click to insert</span>
-      </div>
-      <div class="vars-list" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;"></div>
-      <div style="font-size:12px; opacity:0.8;">Use + - * / ** and functions: abs, round, min, max, pow, math.*</div>
-    `; },
-    code(node, ctx){
-      const src = ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const out = (node.params?.out||'result').replace(/`/g,'');
-      const expr = (node.params?.expr||'').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `df = ${v}`,
+  defaultParams: { input: '', op: 'mul', value: '2', out: 'result' },
+  form(node, ui){
+    const v=node.params||(node.params={});
+    const cols = (ui?.getUpstreamColumns?.(node)) || [];
+    try{
+      const up = ui?.getUpstreamNode?.(node);
+      if(up && up.type==='python.SetGlobal'){
+        const gname = String(up.params?.name||'').trim();
+        if(gname && !cols.includes(gname)) cols.push(gname);
+        if(gname && !v.input){ v.input = gname; }
+      }
+    }catch{}
+    const opts = cols.map(c=>`<option value="${c}">${c}</option>`).join('');
+    const listId = `cols-${node.id}`; const active = (op)=> v.op===op? 'style="background:#1f6feb;color:#fff;border-color:#1f6feb"' : '';
+    return `
+    <label>source — column or global (becomes x)</label>
+    <input name="input" list="${listId}" value="${v.input||''}" placeholder="temp or alpha">
+    <datalist id="${listId}">${opts}</datalist>
+    <div class="op-tabs" role="tablist" style="display:flex; gap:6px; margin:6px 0;">
+    <button type="button" class="op-tab" data-op="add" ${active('add')}>+</button>
+    <button type="button" class="op-tab" data-op="sub" ${active('sub')}>−</button>
+    <button type="button" class="op-tab" data-op="mul" ${active('mul')}>×</button>
+    <button type="button" class="op-tab" data-op="div" ${active('div')}>÷</button>
+    <button type="button" class="op-tab" data-op="pow" ${active('pow')}>^</button>
+    <input type="hidden" name="op" value="${v.op||'mul'}">
+    </div>
+    <label>value (number)</label>
+    <input name="value" type="number" step="any" value="${v.value||'2'}">
+    <label>output column</label>
+    <input name="out" value="${v.out||'result'}" placeholder="result">
+  `; },
+  code(node, ctx){
+    const src = ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+    const out = (node.params?.out||'result').replace(/`/g,'');
+    const op = (node.params?.op||'mul').replace(/`/g,'');
+    const inp = (node.params?.input||'').replace(/`/g,'');
+    const valRaw = (node.params?.value ?? '0');
+    const k = (Number.isFinite(parseFloat(valRaw)) ? String(parseFloat(valRaw)) : '0');
+    return [
+    `${v} = ${src ? src : 'None'}`,
     `try:
-  _res = _fp_eval(r'''${expr}''', dict(df=df))
+  _is_df = isinstance(${v}, pd.DataFrame)
+except Exception:
+  _is_df = False`,
+    `try:
+  __x = None
+  __key = r'''${inp}'''
+  if __key:
+    if _is_df and __key in ${v}.columns:
+      __x = ${v}[__key]
+    else:
+      try:
+        __x = globals().get(__key, None)
+      except Exception:
+        __x = None
+  _op = r'''${op}'''
+  _k = ${k}
+  if _op == 'add':
+    _res = (__x + _k) if __x is not None else None
+  elif _op == 'sub':
+    _res = (__x - _k) if __x is not None else None
+  elif _op == 'mul':
+    _res = (__x * _k) if __x is not None else None
+  elif _op == 'div':
+    _res = (__x / _k) if __x is not None else None
+  else:
+    _res = (__x ** _k) if __x is not None else None
 except Exception as _e:
   _res = None`,
-        `try:
-    df[r'''${out}'''] = _res
-except Exception as _e:
-    pass`,
-        `${v} = df`,
-        `print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // --- ListVariables: list current global variables ---
-  reg.node({
-    id: 'python.ListVariables', title: 'ListVariables',
-    defaultParams: {},
-    form(){ return `
-      <div style="font-size:12px; opacity:0.8;">Lists kernel globals (name, type, repr). No input needed.</div>
-    `; },
-    code(node){
-      const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      return [
-        `_rows = []
-for _k, _v in globals().items():
-    if str(_k).startswith('_'): continue
+    `if _is_df:
+  try:
+    ${v}[r'''${out}'''] = _res
+  except Exception as _e:
     try:
-        _rows.append((str(_k), type(_v).__name__, repr(_v)[:200]))
+      ${v}[r'''${out}'''] = pd.Series([_res]*len(${v}))
     except Exception:
-        _rows.append((str(_k), 'unknown', '<unrepr>'))`,
-        `${v} = pd.DataFrame(_rows, columns=['name','type','repr'])`,
-        `print(${v}.head().to_string())`
+      pass
+else:
+  try:
+    globals()[r'''${out}'''] = _res
+  except Exception:
+    pass`,
+  `print(str(_res))`
       ];
     }
   });
