@@ -3,7 +3,9 @@
 export function register(reg){
   // MakeBlobs: generate sample data
   reg.node({
-    id: 'sklearn.MakeBlobs', title: 'MakeBlobs',
+  id: 'sklearn.MakeBlobs', title: 'MakeBlobs',
+  inputType: 'None',
+  outputType: 'DataFrame',
     defaultParams: { n_samples:'200', centers:'3', cluster_std:'1.0', random_state:'42' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>n_samples</label><input name="n_samples" type="number" value="${v.n_samples||'200'}">
@@ -29,7 +31,9 @@ export function register(reg){
 
   // KMeans clustering
   reg.node({
-    id: 'sklearn.KMeans', title: 'KMeans',
+  id: 'sklearn.KMeans', title: 'KMeans',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { n_clusters:'3', random_state:'42', x:'x1', y:'x2' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -61,7 +65,9 @@ export function register(reg){
 
   // Scatter plot helper for clustering results
   reg.node({
-    id: 'sklearn.ClusterPlot', title:'ClusterPlot',
+  id: 'sklearn.ClusterPlot', title:'ClusterPlot',
+  inputType: 'DataFrame',
+  outputType: 'Figure',
     defaultParams: { x:'x1', y:'x2', c:'cluster', cmap:'tab10', s:'20', alpha:'0.9', title:'KMeans Clusters' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -100,7 +106,9 @@ export function register(reg){
 
   // Train/Test split (adds a 'split' column with 'train'/'test')
   reg.node({
-    id: 'sklearn.TrainTestSplit', title:'Train/Test Split',
+  id: 'sklearn.TrainTestSplit', title:'Train/Test Split',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { test_size:'0.2', random_state:'42', stratify:'' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -133,7 +141,9 @@ export function register(reg){
 
   // StandardScaler (in-place or with suffix)
   reg.node({
-    id: 'sklearn.StandardScaler', title:'StandardScaler',
+  id: 'sklearn.StandardScaler', title:'StandardScaler',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { columns:'', with_mean:true, with_std:true, inplace:true, suffix:'_scaled' },
     form(node, ui){
       const v=node.params||(node.params={});

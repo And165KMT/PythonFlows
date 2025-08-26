@@ -3,7 +3,9 @@
 export function register(reg){
   // ReadCSV
   reg.node({
-    id: 'pandas.ReadCSV', title: 'ReadCSV',
+  id: 'pandas.ReadCSV', title: 'ReadCSV',
+  inputType: 'None',
+  outputType: 'DataFrame',
     defaultParams: { mode:'inline', path:'', dir:'', inline:`city,temp\nTokyo,30\nOsaka,31\nNagoya,29\n` },
     form(node, ui){
       const v = node.params || (node.params = { mode:'inline', path:'', dir:'', inline:'' });
@@ -40,7 +42,9 @@ export function register(reg){
 
   // SelectColumns
   reg.node({
-    id: 'pandas.SelectColumns', title:'SelectColumns',
+  id: 'pandas.SelectColumns', title:'SelectColumns',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { columns:'city,temp' },
     form(node){
       const v=node.params||(node.params={ columns:'' });
@@ -56,7 +60,9 @@ export function register(reg){
 
   // FilterRows
   reg.node({
-    id: 'pandas.FilterRows', title:'FilterRows',
+  id: 'pandas.FilterRows', title:'FilterRows',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { expr:'temp >= 30' },
   form(node){ const v=node.params||(node.params={expr:''}); return `<label>pandas.query()</label><input name=expr value="${v.expr}">`; },
   code(node, ctx){ const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); return [`${v} = ${src}.query(_fp_render(r'''${node.params.expr||''}'''))`,`print(${v}.head().to_string())`]; }
@@ -64,7 +70,9 @@ export function register(reg){
 
   // GroupByAggregate
   reg.node({
-    id: 'pandas.GroupByAggregate', title:'GroupByAggregate',
+  id: 'pandas.GroupByAggregate', title:'GroupByAggregate',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { by:'city', value:'temp', func:'mean' },
     form(node){ const v=node.params||(node.params={by:'',value:'',func:'mean'}); return `
       <label>group by</label><input name="by" value="${v.by}">
@@ -76,7 +84,9 @@ export function register(reg){
 
   // Plot
   reg.node({
-    id: 'pandas.Plot', title:'Plot',
+  id: 'pandas.Plot', title:'Plot',
+  inputType: 'DataFrame',
+  outputType: 'Figure',
     defaultParams: { 
       kind:'bar', x:'city', y:'temp',
       color:'#1f77b4', linewidth:'2', marker:'', alpha:'1.0',
@@ -266,7 +276,9 @@ export function register(reg){
 
   // CorrHeatmap
   reg.node({
-    id: 'pandas.CorrHeatmap', title: 'CorrHeatmap',
+  id: 'pandas.CorrHeatmap', title: 'CorrHeatmap',
+  inputType: 'DataFrame',
+  outputType: 'Figure',
     defaultParams: { method:'pearson', cmap:'coolwarm', annot:true, figsizeW:'6', figsizeH:'4', dpi:'100' },
     form(node, ui){ const v=node.params||(node.params={}); return `
       <label>method</label><select name="method"><option ${v.method==='pearson'?'selected':''}>pearson</option><option ${v.method==='kendall'?'selected':''}>kendall</option><option ${v.method==='spearman'?'selected':''}>spearman</option></select>
@@ -306,7 +318,9 @@ export function register(reg){
 
   // SortValues
   reg.node({
-    id: 'pandas.SortValues', title:'Sort',
+  id: 'pandas.SortValues', title:'Sort',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { by:'', ascending:true },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -330,7 +344,9 @@ export function register(reg){
 
   // RenameColumns
   reg.node({
-    id: 'pandas.RenameColumns', title:'Rename',
+  id: 'pandas.RenameColumns', title:'Rename',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { mapping:'' },
     form(node){
       const v=node.params||(node.params={});
@@ -358,7 +374,9 @@ export function register(reg){
 
   // DropNA
   reg.node({
-    id: 'pandas.DropNA', title:'DropNA',
+  id: 'pandas.DropNA', title:'DropNA',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { subset:'', how:'any' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>subset (comma)</label><input name="subset" placeholder="col1,col2" value="${v.subset||''}">
@@ -376,7 +394,9 @@ export function register(reg){
 
   // FillNA
   reg.node({
-    id: 'pandas.FillNA', title:'FillNA',
+  id: 'pandas.FillNA', title:'FillNA',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { column:'', value:'' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -403,7 +423,9 @@ export function register(reg){
 
   // Head/Tail
   reg.node({
-    id: 'pandas.HeadTail', title:'Head/Tail',
+  id: 'pandas.HeadTail', title:'Head/Tail',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { mode:'head', n:'5' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>mode</label><select name="mode"><option ${v.mode==='head'?'selected':''}>head</option><option ${v.mode==='tail'?'selected':''}>tail</option></select>
@@ -414,7 +436,9 @@ export function register(reg){
 
   // ValueCounts
   reg.node({
-    id: 'pandas.ValueCounts', title:'ValueCounts',
+  id: 'pandas.ValueCounts', title:'ValueCounts',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { column:'' },
     form(node, ui){ const v=node.params||(node.params={}); const cols=ui.getUpstreamColumns(node); const opts = cols.map(c=>`<option ${v.column===c?'selected':''}>${c}</option>`).join(''); return `
       <label>column</label><select name="column">${opts}</select>
@@ -429,7 +453,9 @@ export function register(reg){
 
   // PivotTable
   reg.node({
-    id: 'pandas.PivotTable', title:'PivotTable',
+  id: 'pandas.PivotTable', title:'PivotTable',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { index:'', columns:'', values:'', aggfunc:'mean', fill_value:'' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -462,7 +488,9 @@ export function register(reg){
 
   // Melt
   reg.node({
-    id: 'pandas.Melt', title:'Melt',
+  id: 'pandas.Melt', title:'Melt',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { id_vars:'', value_vars:'', var_name:'variable', value_name:'value' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>id_vars (comma)</label><input name="id_vars" value="${v.id_vars||''}">
@@ -482,7 +510,9 @@ export function register(reg){
 
   // AddColumn (assign via eval expression)
   reg.node({
-    id: 'pandas.AddColumn', title:'AddColumn',
+  id: 'pandas.AddColumn', title:'AddColumn',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { newcol:'new', expr:'' },
     form(node, ui){ const v=node.params||(node.params={}); return `
       <label>new column</label><input name="newcol" value="${v.newcol||'new'}" placeholder="new">
@@ -499,7 +529,9 @@ export function register(reg){
 
   // Merge (integrate/join with another DataFrame)
   reg.node({
-    id: 'pandas.Merge', title: 'Merge',
+  id: 'pandas.Merge', title: 'Merge',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { how: 'inner', on: '', left_on: '', right_on: '', with: 'global', rhs: 'df2', path: '' },
     form(node, ui){
       const v=node.params||(node.params={});
@@ -537,20 +569,33 @@ export function register(reg){
       `;
     },
     code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const how=(node.params?.how||'inner');
       const on=(node.params?.on||'');
       const left_on=(node.params?.left_on||'');
       const right_on=(node.params?.right_on||'');
-      const mode=(node.params?.with==='csv')?'csv':'global';
-      const rhsName=(node.params?.rhs||'df2').replace(/`/g,'');
-      const path=(node.params?.path||'').replace(/`/g,'');
       const args=[]; if(on) args.push(`on='${on}'`); if(left_on) args.push(`left_on='${left_on}'`); if(right_on) args.push(`right_on='${right_on}'`); args.push(`how='${how}'`);
-      const lines=[`${v} = ${src}`];
-      if(mode==='csv'){
-        lines.push(`__rhs = pd.read_csv(_fp_render(r'''${path}'''))`);
+
+      const multi = (typeof ctx.incomingCount==='function' ? ctx.incomingCount(node) : 0) >= 2;
+      const srcs = (typeof ctx.srcVars==='function' ? ctx.srcVars(node) : []);
+      const src = (typeof ctx.srcVar==='function' ? ctx.srcVar(node) : null);
+      const lines=[];
+      if(multi && srcs.length>=2){
+        const left = srcs[0];
+        const right = srcs[1];
+        lines.push(`${v} = ${left}`);
+        lines.push(`__rhs = ${right}`);
       } else {
-        lines.push(`__rhs = globals().get(r'''${rhsName}''', None)`);
+        // Fallback: original single-input behavior (global/CSV)
+        const mode=(node.params?.with==='csv')?'csv':'global';
+        const rhsName=(node.params?.rhs||'df2').replace(/`/g,'');
+        const path=(node.params?.path||'').replace(/`/g,'');
+        lines.push(`${v} = ${src}`);
+        if(mode==='csv'){
+          lines.push(`__rhs = pd.read_csv(_fp_render(r'''${path}'''))`);
+        } else {
+          lines.push(`__rhs = globals().get(r'''${rhsName}''', None)`);
+        }
       }
       lines.push(`try:\n  ${v} = ${v}.merge(__rhs, ${args.join(', ')})\nexcept Exception as _e:\n  print('MERGE_ERROR:', _e); pass`);
       lines.push(`print(${v}.head().to_string())`);

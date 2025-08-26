@@ -1,9 +1,61 @@
 // Python/IO utilities and control-flow nodes for FlowPython
 
 export function register(reg){
+  // --- ListCreate: simple DataFrame source from a comma-separated list ---
+  reg.node({
+    id: 'python.ListCreate', title: 'ListCreate',
+    inputType: 'None',
+    outputType: 'DataFrame',
+    defaultParams: { values: '1,2,3', column: 'value', as: 'number' },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>values (comma-separated)</label>
+      <input name="values" value="${(v.values||'').replace(/"/g,'&quot;')}" placeholder="1,2,3 or a,b,c">
+      <label>interpret as</label>
+      <select name="as">
+        <option value="number" ${String(v.as||'number')==='number'?'selected':''}>number</option>
+        <option value="string" ${String(v.as)==='string'?'selected':''}>string</option>
+        <option value="auto" ${String(v.as)==='auto'?'selected':''}>auto</option>
+      </select>
+      <label>column name</label>
+      <input name="column" value="${v.column||'value'}" placeholder="value">
+      <div style="font-size:12px; opacity:0.8; margin-top:6px;">Creates a one-column DataFrame from the list.</div>
+    `; },
+    code(node){
+      const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const raw = String(node.params?.values ?? '').replace(/`/g,'');
+      const col = String(node.params?.column ?? 'value').replace(/`/g,'');
+      const as  = String(node.params?.as ?? 'number').replace(/`/g,'');
+      return [
+        `__raw = r'''${raw}'''`,
+        `__parts = [s.strip() for s in (__raw.split(',') if __raw else [])]`,
+        `__vals = []`,
+        `__as = r'''${as}'''`,
+        `for __s in __parts:
+    if not __s:
+        continue
+    if __as == 'string':
+        __vals.append(__s)
+    elif __as == 'number':
+        try:
+            __vals.append(float(__s))
+        except Exception:
+            __vals.append(float('nan'))
+    else:
+        # auto: try number, else string
+        try:
+            __vals.append(float(__s))
+        except Exception:
+            __vals.append(__s)`,
+        `${v} = pd.DataFrame({r'''${col}''': __vals})`,
+        `print(${v}.head().to_string())`
+      ];
+    }
+  });
   // --- Globals: Set multiple kernel-level variables ---
   reg.node({
     id: 'python.SetGlobal', title: 'SetGlobal',
+  inputType: 'Any',
+  outputType: 'Any',
     defaultParams: { name: 'alpha', value: '1' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>name</label>
@@ -29,6 +81,8 @@ export function register(reg){
   // --- Math: evaluate expression and store into a new column ---
   reg.node({
     id: 'python.Math', title: 'Math',
+  inputType: 'DataFrame|Any',
+  outputType: 'DataFrame|Any',
   defaultParams: { input: '', op: 'mul', value: '2', out: 'result' },
   form(node, ui){
     const v=node.params||(node.params={});
@@ -119,6 +173,8 @@ else:
   // --- GetGlobal: fetch an existing global variable into a 1-row DataFrame ---
   reg.node({
     id: 'python.GetGlobal', title: 'GetGlobal',
+  inputType: 'None',
+  outputType: 'DataFrame',
     defaultParams: { name: 'alpha' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>variable name</label>
@@ -139,6 +195,8 @@ else:
   // File: ReadText
   reg.node({
     id: 'python.FileReadText', title: 'ReadText',
+  inputType: 'None',
+  outputType: 'DataFrame',
     defaultParams: { mode:'path', path: '', inline:'' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>mode</label>
@@ -177,6 +235,8 @@ else:
   // File: WriteCSV (pass-through)
   reg.node({
     id: 'python.FileWriteCSV', title: 'WriteCSV',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { mode:'path', path: '', filename:'data.csv' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>mode</label>
@@ -204,6 +264,8 @@ else:
   // Python Exec (free-form) – pass-through by default
   reg.node({
     id: 'python.Exec', title: 'PythonExec',
+  inputType: 'DataFrame|Any',
+  outputType: 'DataFrame|Any',
     defaultParams: { code: '# df is available here\n# Example: df["new"] = 1' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>code (uses variable df)</label>
@@ -225,6 +287,8 @@ else:
   // IfApply – when condition True, run body; else passthrough
   reg.node({
     id: 'python.If', title: 'If',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { condition: "len(df) > 0", then: "# df = df\n# e.g., df = df.head(5)", else: "# else: pass" },
     form(node){ const v=node.params||(node.params={}); return `
       <label>condition (Python expr)</label>
@@ -251,6 +315,8 @@ else:
   // ForApply – repeat N times body(df, i)
   reg.node({
     id: 'python.For', title: 'For',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { times: '3', break_if: '', body: '# df and i are available\n# e.g., df["i"] = i' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>times</label><input name="times" type="number" step="1" value="${v.times||'1'}">
@@ -271,6 +337,8 @@ else:
   // WhileApply – while condition and i<max
   reg.node({
     id: 'python.While', title: 'While',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
     defaultParams: { condition: 'len(df) > 1', break_if:'', max_iter: '10', body: '# mutate df until condition becomes False' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>condition (Python expr)</label><input name="condition" value="${v.condition||''}" placeholder="len(df) > 1">
@@ -293,16 +361,89 @@ else:
   // --- Hidden: Template for future node implementations (not shown in UI) ---
   reg.node({
     id: 'python.__Template', title: 'Template (hidden)', hidden: true,
-    defaultParams: { param1: '', param2: '' },
+    // Typed ports (union allowed). Use Any if you don't want enforcement.
+    inputType: 'DataFrame|list|tuple|dict|set|ndarray|str|int|float|bool|iterator',
+    outputType: 'DataFrame',
+    defaultParams: { param1: '', flag: 'false', materialize: 'auto', coerce: 'auto', copy: 'none' },
     form(node){ const v=node.params||(node.params={}); return `
-      <label>param1</label><input name="param1" value="${v.param1||''}">
-      <label>param2</label><input name="param2" value="${v.param2||''}">
-      <div style="font-size:12px; opacity:0.7;">This is a non-visual template node for reference.</div>
+      <label>param1 (text)</label>
+      <input name="param1" value="${(v.param1||'').replace(/"/g,'&quot;')}" placeholder="hello">
+      <label>flag</label>
+      <select name="flag"><option value="false" ${String(v.flag)!=='true'?'selected':''}>false</option><option value="true" ${String(v.flag)==='true'?'selected':''}>true</option></select>
+      <label>materialize iterators</label>
+      <select name="materialize"><option ${String(v.materialize||'auto')==='auto'?'selected':''}>auto</option><option ${String(v.materialize)==='never'?'selected':''}>never</option></select>
+      <label>coerce to DataFrame</label>
+      <select name="coerce"><option ${String(v.coerce||'auto')==='auto'?'selected':''}>auto</option><option ${String(v.coerce)==='never'?'selected':''}>never</option></select>
+      <label>copy mode (DataFrame)</label>
+      <select name="copy"><option ${String(v.copy||'none')==='none'?'selected':''}>none</option><option ${String(v.copy)==='shallow'?'selected':''}>shallow</option><option ${String(v.copy)==='deep'?'selected':''}>deep</option></select>
+      <div style="font-size:12px; opacity:0.7;">Union input types, iterator materialization, and DataFrame coercion for stable previews.</div>
     `; },
     code(node, ctx){
       const src = ctx.srcVar(node);
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      return [ `${v} = ${src} if ${src} is not None else pd.DataFrame()` ];
+      const p1 = String(node.params?.param1 ?? '').replace(/`/g,'');
+      const flg = String(node.params?.flag   ?? 'false').replace(/`/g,'');
+      const mat = String(node.params?.materialize ?? 'auto').replace(/`/g,'');
+      const co  = String(node.params?.coerce ?? 'auto').replace(/`/g,'');
+      const cp  = String(node.params?.copy ?? 'none').replace(/`/g,'');
+      return [
+        `${v} = ${src ? src : 'pd.DataFrame()'}`,
+        `# Materialize iterators/generators if requested (best-effort)
+try:
+  if r'''${mat}''' == 'auto':
+    from collections.abc import Iterator
+    if isinstance(${v}, Iterator):
+      ${v} = list(${v})
+except Exception:
+  pass`,
+        `# Coerce common Python types to DataFrame for consistent preview
+try:
+  if r'''${co}''' == 'auto':
+    import numpy as _np
+    if isinstance(${v}, pd.DataFrame):
+      pass
+    elif isinstance(${v}, (list, tuple, set)):
+      _tmp = list(${v})
+      if _tmp and isinstance(_tmp[0], dict):
+        ${v} = pd.DataFrame(_tmp)
+      else:
+        ${v} = pd.DataFrame({'value': _tmp})
+    elif isinstance(${v}, dict):
+      ${v} = pd.DataFrame([${v}])
+    elif 'numpy' in str(type(${v})) or isinstance(${v}, getattr(_np, 'ndarray', tuple)):
+      try:
+        ${v} = pd.DataFrame(${v})
+      except Exception:
+        ${v} = pd.DataFrame()
+    elif isinstance(${v}, (str, int, float, bool)):
+      ${v} = pd.DataFrame({'value':[${v}]})
+except Exception:
+  pass`,
+        `# Optional copy for DataFrame
+try:
+  if isinstance(${v}, pd.DataFrame):
+    if r'''${cp}''' == 'shallow':
+      ${v} = ${v}.copy()
+    elif r'''${cp}''' == 'deep':
+      ${v} = ${v}.copy(deep=True)
+except Exception:
+  pass`,
+        `try:
+  # Example transformation using parameters
+  _flag = (r'''${flg}''' == 'true')
+  _text = r'''${p1}'''
+  if isinstance(${v}, pd.DataFrame):
+    if _text:
+      ${v}['note'] = _text
+    if _flag:
+      ${v} = ${v}.head(5)
+  else:
+    ${v} = pd.DataFrame({'value':[repr(${src||'None'})], 'note':[ _text ]})
+except Exception as _e:
+  print('TEMPLATE_ERROR:', _e)
+  ${v} = pd.DataFrame()` ,
+        `print(${v}.head().to_string())`
+      ];
     }
   });
 }

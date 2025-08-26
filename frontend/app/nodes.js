@@ -8,6 +8,8 @@ export const state = {
   lastPlotNodeId: null,
   activePkg: null,
   selectedNodeId: null,
+  // viewport transform for zoom/pan
+  view: { scale: 1, tx: 0, ty: 0 },
   preview: { head: new Map(), desc: new Map(), headHtml: new Map(), descHtml: new Map() },
   stream: { currentNodeId: null, buffers: new Map() }
 };
@@ -18,6 +20,10 @@ export function uid(){ return 'n' + (state.nextId++); }
 export function getNode(id){ return state.nodes.find(n => n.id === id); }
 
 export function upstreamOf(node){ const e = state.edges.find(x=>x.to===node.id); if(!e) return null; return getNode(e.from); }
+
+// For nodes that can accept multiple inputs (e.g., pandas.Merge), return all upstream nodes in edge order
+export function upstreamsOf(node){ return state.edges.filter(x=> x.to===node.id).map(e=> getNode(e.from)).filter(Boolean); }
+export function incomingCount(node){ return state.edges.filter(e=> e.to===node.id).length; }
 
 export function computeUpstreamColumns(n){
   const seen = new Set();
@@ -48,7 +54,7 @@ export function computeUpstreamColumns(n){
       const newcol = String(cur.params?.newcol||'new').trim();
       return uniq(newcol ? [...cols, newcol] : cols);
     }
-    if(cur.type==='pandas.RenameColumns'){
+  if(cur.type==='pandas.RenameColumns'){
       const cols = walk(up);
       const mappingStr = String(cur.params?.mapping||'');
       const map = new Map();
@@ -57,6 +63,16 @@ export function computeUpstreamColumns(n){
         if(oldN){ map.set(oldN.trim(), (newN||'').trim()); }
       });
       return cols.map(c=> map.has(c) && map.get(c) ? map.get(c) : c);
+    }
+    if(cur.type==='pandas.Merge'){
+      // If two inputs, union columns from both; else fallback to upstream walk
+      const ups = upstreamsOf(cur);
+      if(ups.length>=2){
+        const a = walk(ups[0]);
+        const b = walk(ups[1]);
+        return uniq([...(a||[]), ...(b||[])]);
+      }
+      return walk(up);
     }
     if(cur.type==='pandas.ValueCounts'){
       const col = String(cur.params?.column||'').trim();
@@ -120,7 +136,16 @@ export function suggestionsForNode(fromId){
 
 export function addNode(type, x=80, y=80){
   const def = registry.nodes.get(type);
-  const n = { id: uid(), type, x, y, params: JSON.parse(JSON.stringify(def?.defaultParams||{})) };
+  const n = {
+    id: uid(),
+    type,
+    x,
+    y,
+    // default node size (can be changed via UI)
+    w: 220,
+    prevH: 140,
+    params: JSON.parse(JSON.stringify(def?.defaultParams||{}))
+  };
   state.nodes.push(n);
   return n;
 }
@@ -220,7 +245,13 @@ export function genCode(){
     '    except Exception:',
     '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
   ];
-  const lines = [...header]; const varOf = {}; const ctx = { srcVar: (node)=> varOf[upstreamOf(node)?.id], varOfId: (id)=> varOf[id], setLastPlotNode: (id)=> state.lastPlotNodeId=id };
+  const lines = [...header]; const varOf = {}; const ctx = {
+    srcVar: (node)=> varOf[upstreamOf(node)?.id],
+    srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
+    varOfId: (id)=> varOf[id],
+    setLastPlotNode: (id)=> state.lastPlotNodeId=id,
+    incomingCount: (node)=> incomingCount(node)
+  };
   order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
     const isPlot = n.type==='pandas.Plot' || n.type==='sklearn.ClusterPlot';
     const allowPreview = (pmode==='all');
@@ -303,7 +334,13 @@ export function genCodeUpTo(targetId){
     '    except Exception:',
     '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
   ];
-  const lines = [...header]; const varOf = {}; const ctx = { srcVar: (node)=> varOf[upstreamOf(node)?.id], varOfId: (id)=> varOf[id], setLastPlotNode: (id)=> state.lastPlotNodeId=id };
+  const lines = [...header]; const varOf = {}; const ctx = {
+    srcVar: (node)=> varOf[upstreamOf(node)?.id],
+    srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
+    varOfId: (id)=> varOf[id],
+    setLastPlotNode: (id)=> state.lastPlotNodeId=id,
+    incomingCount: (node)=> incomingCount(node)
+  };
   order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
