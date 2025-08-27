@@ -24,7 +24,7 @@ Quickstart (Windows PowerShell):
 	```
 
 5) Open http://localhost:8000 in your browser
-![alt text](image.png)
+![alt text](Demo.mp4)
 Notes:
 License:
 - This repository is released under FlowPython Community Edition License (FP-CEL). Individuals are free to use; companies must contact us for commercial use or for more than one sheet. See LICENSE.md.

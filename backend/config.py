@@ -1,8 +1,9 @@
 import os
+from typing import Optional
 from .license import verify_license_for_feature
 
 
-def _truthy(val: str | None) -> bool:
+def _truthy(val: Optional[str]) -> bool:
     if val is None:
         return False
     return val.strip().lower() in {"1", "true", "yes", "on"}
