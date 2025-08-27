@@ -3,7 +3,9 @@
 export function register(reg){
   // RandomNormal -> DataFrame with named columns
   reg.node({
-    id: 'numpy.RandomNormal', title:'RandomNormal',
+  id: 'numpy.RandomNormal', title:'RandomNormal',
+  inputType: 'None',
+  outputType: 'DataFrame',
     defaultParams: { rows:'200', cols:'2', mean:'0', std:'1', prefix:'x' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>rows</label><input name="rows" type="number" value="${v.rows||'200'}">

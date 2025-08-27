@@ -1,5 +1,15 @@
 // UI and rendering for FlowPython
-import { state, registry, getNode, addNode, selectNode, clearSelection, deleteNodeById, uid, computeUpstreamColumns, suggestionsForNode, genCode, genCodeUpTo, loadPackages, setPreviewModeProvider } from './nodes.js';
+import { state, registry, getNode, addNode, selectNode, clearSelection, deleteNodeById, uid, computeUpstreamColumns, suggestionsForNode, genCode, genCodeUpTo, loadPackages, setPreviewModeProvider, upstreamOf, setSelection, addToSelection, removeFromSelection, isSelected, saveToLocal, restoreFromLocal, makeSubgraph, pasteSubgraph, deleteNodes, createGroup, getGroup, genCodeForNodes } from './nodes.js';
+import { injectBaseStyles, styleTableHtml as styleTableHtmlUtil, escapeHtml as escapeHtmlUtil } from './utils.js';
+import { drawEdges as drawEdgesMod, syncEdgesViewport as syncEdgesViewportMod, setGhost as setGhostMod, clearGhost as clearGhostMod } from './edges.js';
+import { updateNodePreview as updateNodePreviewMod, isFigureNode as isFigureNodeMod, getPreviewMode as getPreviewModeMod } from './preview.js';
+import { bindForm as bindFormMod } from './forms.js';
+import { openContextMenu, closeContextMenu } from './contextmenu.js';
+import { initInteractions as initInteractionsMod } from './interactions.js';
+import { openQuickAdd as openQuickAddMod, closeQuickAdd as closeQuickAddMod } from './quickadd.js';
+
+// Treat any node whose outputType is 'Figure' as a plot node (delegated)
+function isFigureNode(n){ return isFigureNodeMod(n, registry); }
 
 const canvasWrap = document.getElementById('canvasWrap');
 const nodesEl = document.getElementById('nodes');
@@ -14,71 +24,518 @@ const tabCode = document.getElementById('tabCode');
 const tabVars = document.getElementById('tabVars');
 const varsWrap = document.getElementById('varsWrap');
 const previewModeEl = document.getElementById('previewMode');
+let subsystemsEl; // created when rendering subsystems
+// selection rectangle state
+let selBoxEl = null; let selecting = false; let selStart = null; let lastSel = [];
+let groupsLayer = null; // layer for subsystem frames inside #nodes
+let lastMouseWorld = { x: 100, y: 100 };
+let isSpaceDown = false; // hold Space for panning
+let panning = false; let panStart = null; let panStartView = null;
+let kernelDisabled = false; // backend gated kernel feature
 
-function getPreviewMode(){ const v = previewModeEl?.value || 'plots'; return (v==='all' || v==='plots' || v==='none') ? v : 'plots'; }
+// inject minimal styles for spinner and group frames
+injectBaseStyles();
+
+// ランボタン有効/無効の集中管理
+let runningLock = false; // 実行中はtrue
+function canRun(){ return !kernelDisabled && ws && ws.readyState===1 && !runningLock; }
+function updateRunButtonsState(){
+  const enabled = canRun();
+  const toggle = (btn)=>{ if(!btn) return; btn.disabled = !enabled; btn.classList.toggle('btn-busy', !enabled); };
+  // グローバル
+  toggle(globalRunBtn);
+  // ノード
+  document.querySelectorAll('.node .node-run').forEach(toggle);
+  // サブシステム一覧
+  document.querySelectorAll('#subsystems .run-sub').forEach(toggle);
+  // サブシステム枠
+  document.querySelectorAll('.group-frame .actions .run').forEach(toggle);
+}
+
+// Busy-run helper: disable a button, show spinner while async fn runs
+async function runWithBusy(fn, btn, runningLabel){
+  try{
+    // カーネル未接続や実行中は押せない
+    if(!canRun()) { updateRunButtonsState(); return; }
+    // 実行開始: Variables更新をidleで一度だけ行うためのフラグ
+    pendingVarsRefresh = true;
+    runningLock = true; statusEl.textContent='running...'; updateRunButtonsState();
+    if(btn && btn.classList.contains('btn-busy') === false){
+      const orig = { html: btn.innerHTML, text: btn.textContent };
+      btn.disabled = true; btn.classList.add('btn-busy');
+      const label = (typeof runningLabel==='string' && runningLabel) ? runningLabel : (orig.text||'Running');
+      btn.innerHTML = `<span class="spinner"></span>${label}`;
+      try{ await fn(); }
+  finally{ btn.disabled = false; btn.classList.remove('btn-busy'); btn.innerHTML = orig.html; /* runningLock is released on WS idle */ updateRunButtonsState(); }
+    } else {
+      try{ await fn(); }
+  finally{ /* runningLock is released on WS idle */ updateRunButtonsState(); }
+    }
+  }catch(err){ runningLock = false; updateRunButtonsState(); appendLog('[run] error ' + (err && err.message ? err.message : String(err))); }
+}
+
+// Simple image zoom overlay
+function openZoomOverlay(src){
+  try{
+    const ov = document.createElement('div');
+    Object.assign(ov.style, { position:'fixed', inset:'0', background:'rgba(0,0,0,0.7)', zIndex:5000, display:'flex', alignItems:'center', justifyContent:'center' });
+    const img = document.createElement('img'); img.src = src; Object.assign(img.style, { maxWidth:'90%', maxHeight:'90%', boxShadow:'0 10px 30px rgba(0,0,0,0.6)', border:'1px solid #000' });
+    ov.appendChild(img);
+    const close = ()=>{ ov.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e)=>{ if(e.key==='Escape') close(); };
+    ov.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(ov);
+  }catch{}
+}
+
+function getPreviewMode(){ return getPreviewModeMod(previewModeEl); }
 setPreviewModeProvider(getPreviewMode);
 
-// Resizer
 const resizer = document.getElementById('rightResizer');
 if(resizer){ let dragging=false, startX=0, startW=0; resizer.addEventListener('mousedown', (e)=>{ dragging=true; startX=e.clientX; const cs = getComputedStyle(document.documentElement); const w = cs.getPropertyValue('--right-w').trim(); startW = parseInt(w||'380') || 380; document.body.style.userSelect='none'; }); window.addEventListener('mouseup', ()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; }); window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx = startX - e.clientX; const newW = Math.max(260, Math.min(900, startW + dx)); document.documentElement.style.setProperty('--right-w', newW + 'px'); syncEdgesViewport(); }); }
 
 // Toolbar top bar with Run All
 const tabsBar = document.createElement('div'); tabsBar.style.display='flex'; tabsBar.style.gap='6px'; tabsBar.style.marginBottom='8px'; toolbarEl.before(tabsBar);
-const globalRunBtn = document.createElement('button'); globalRunBtn.textContent='▶ Run All'; Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' }); globalRunBtn.addEventListener('click', async ()=>{ ensureWS(); clearLog(); statusEl.textContent='running...'; const code = genCode(); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec: ' + JSON.stringify(js)); statusEl.textContent='idle'; pendingVarsRefresh = !!(rightVars && rightVars.style.display!=='none'); }); tabsBar.appendChild(globalRunBtn);
+const globalRunBtn = document.createElement('button'); globalRunBtn.textContent='▶ Run All'; Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' }); globalRunBtn.addEventListener('click', async ()=>{
+  await runWithBusy(async ()=>{
+    ensureWS(); clearLog(); statusEl.textContent='running...';
+    const code = genCode(); genCodeEl.textContent = code;
+    const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+    let js={}; try{ js=await res.json(); }catch{}
+  appendLog('Sent exec: ' + JSON.stringify(js));
+  }, globalRunBtn, 'Running...');
+}); tabsBar.appendChild(globalRunBtn);
 
 function appendLog(x){ log.textContent += x + "\n"; log.scrollTop = log.scrollHeight; }
 function clearLog(){ log.textContent = ''; }
 function centerOf(el){ const r = el.getBoundingClientRect(); const p = edgesSvg.getBoundingClientRect(); return { x: r.left - p.left + r.width/2, y: r.top - p.top + r.height/2 }; }
+// View helpers (screen<->world)
+function getScale(){ return state.view?.scale || 1; }
+function getTx(){ return state.view?.tx || 0; }
+function getTy(){ return state.view?.ty || 0; }
+function screenToWorldPoint(clientX, clientY){ const rect = canvasWrap.getBoundingClientRect(); const x = clientX - rect.left; const y = clientY - rect.top; const s = getScale(); return { x: (x - getTx())/s, y: (y - getTy())/s }; }
+function applyViewTransform(){ const s=getScale(), tx=getTx(), ty=getTy(); nodesEl.style.transformOrigin='0 0'; nodesEl.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`; }
 function updatePreviewDock(){}
 
+// 選択ハイライトをDOMへ反映
+function refreshSelectionHighlight(){
+  const S = new Set(state.selection||[]);
+  document.querySelectorAll('.node').forEach(el=>{
+    const id = el.getAttribute('data-node-id');
+    if(!id) return;
+    if(S.has(id)) el.classList.add('selected'); else el.classList.remove('selected');
+  });
+}
+
+// 追加: クリップボード（キャンバス貼り付け用に window にも同期）
+let clipboardGraph = null;
+
+// ノード右クリックメニュー
+function openNodeContextMenu(nodeId, clientX, clientY){
+  const ids = (state.selection && state.selection.size && state.selection.has(nodeId))
+    ? Array.from(state.selection)
+    : [nodeId];
+  const doCopy = ()=>{ try{ clipboardGraph = makeSubgraph(ids); }catch{ clipboardGraph = null; } window.__pf_clipboardGraph = clipboardGraph; };
+  const doCut = ()=>{ try{ clipboardGraph = makeSubgraph(ids); }catch{ clipboardGraph = null; } window.__pf_clipboardGraph = clipboardGraph; try{ deleteNodes(ids); }catch{} render(); };
+  const doDuplicate = ()=>{
+    try{
+      const g = makeSubgraph(ids);
+      const wpt = screenToWorldPoint(clientX, clientY);
+      const newIds = pasteSubgraph(g, { x: (wpt.x||0) + 40, y: (wpt.y||0) + 40 }) || [];
+      if(newIds && newIds.length) setSelection(newIds);
+      render();
+    }catch{}
+  };
+  const items = [
+    { key:'copy', label:'Copy', onClick: doCopy },
+    { key:'cut', label:'Cut', onClick: doCut },
+    { key:'dup', label:'Duplicate', onClick: doDuplicate },
+    { key:'paste', label:'Paste', disabled:!clipboardGraph, onClick: ()=>{
+        if(!clipboardGraph) return;
+        try{
+          const wpt = screenToWorldPoint(clientX, clientY);
+          const newIds = pasteSubgraph(clipboardGraph, { x: (wpt.x||0) + 40, y: (wpt.y||0) + 40 }) || [];
+          if(newIds && newIds.length) setSelection(newIds);
+          render();
+        }catch{}
+      } },
+  ];
+  openContextMenu(items, clientX, clientY);
+}
+
 // Variables
-function escapeHtml(s){ return String(s).replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); }
-function styleTableHtml(html){ try{ const wrapper = document.createElement('div'); wrapper.innerHTML = html; const table = wrapper.querySelector('table'); if(table){ table.style.width='100%'; table.style.borderCollapse='collapse'; table.querySelectorAll('th,td').forEach(cell=>{ cell.style.border='1px solid #263041'; cell.style.padding='4px 6px'; }); table.querySelectorAll('thead').forEach(t=> t.style.background = '#111824'); table.querySelectorAll('tbody tr:nth-child(even)').forEach(tr=> tr.style.background = '#0b1220'); table.style.color = 'var(--text)'; table.style.fontSize = '12px'; return wrapper.innerHTML; } }catch{} return html; }
+const escapeHtml = (s)=> escapeHtmlUtil(s);
+const styleTableHtml = (html)=> styleTableHtmlUtil(html);
 function filterVars(arr){ try{ return (arr||[]).filter(v=>{ const t = String(v.type||'').toLowerCase(); const n = String(v.name||'').toLowerCase(); if(n==='exit' || n==='quit') return false; if(n==='in' || n==='out') return false; if(n.startsWith('_')) return false; if(t.includes('module')) return false; if(t.includes('function')) return false; if(t.includes('method')) return false; if(t.includes('autocall')) return false; if(t.includes('zmqexitautocall')) return false; return true; }); }catch{ return arr||[]; } }
-async function refreshVariables(){ if(!rightVars || rightVars.style.display==='none') return; try{ const res = await fetch('/api/variables'); const js = await res.json(); const arrRaw = Array.isArray(js.variables) ? js.variables : []; const arr = filterVars(arrRaw); const rows = arr.map(v=>{ const name = escapeHtml(v.name); const type = escapeHtml(v.type); if(String(v.type).toLowerCase()==='dataframe' && v.html){ return `<tr><td>${name}</td><td>${type}</td><td>${styleTableHtml(v.html)}</td></tr>`; } const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): '')); return `<tr><td>${name}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`; }).join(''); varsWrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px; table-layout:fixed;"><colgroup><col style="width:32%"><col style="width:20%"><col style="width:48%"></colgroup><thead><tr><th style="text-align:left; border-bottom:1px solid #263041; padding:4px 6px;">名前</th><th style="text-align:left; border-bottom:1px solid #263041; padding:4px 6px;">型</th><th style="text-align:left; border-bottom:1px solid #263041; padding:4px 6px;">値</th></tr></thead><tbody style="word-break:break-word;">${rows || '<tr><td colspan="3" style="padding:6px; color:#9ba3af;">変数がありません</td></tr>'}</tbody></table>`; }catch{ varsWrap.innerHTML = '<div style="color:#9ba3af">変数の取得に失敗しました</div>'; } }
+async function refreshVariables(){
+  if(!rightVars || rightVars.style.display==='none') return;
+  try{
+    const res = await fetch('/api/variables');
+    const js = await res.json();
+    const arrRaw = Array.isArray(js.variables) ? js.variables : [];
+    const arr = filterVars(arrRaw);
+    const rows = arr.map(v=>{
+      const name = escapeHtml(v.name);
+      const type = escapeHtml(v.type);
+      const nameCell = `<span class="var-item" draggable="true" data-var="${name}" title="ドラッグ＆ドロップでノードの入力に上書き"><svg class="drag-handle" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="var-label">${name}</span></span>`;
+      const tLower = String(v.type).toLowerCase();
+      if(tLower==='dataframe' && v.html){
+        const dims = (typeof v.rows==='number' && typeof v.cols==='number') ? `<div style="color:var(--sub); font-size:11px; margin-top:4px">${v.rows.toLocaleString()} rows × ${v.cols.toLocaleString()} cols</div>` : '';
+        // wrap DataFrame HTML in a horizontally scrollable container so全列閲覧可
+        return `<tr><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}</td></tr>`;
+      }
+      if(tLower==='ndarray'){
+        const shp = Array.isArray(v.shape)? `shape=${escapeHtml(String(v.shape))}` : '';
+        const val = (v.repr!=null? String(v.repr): '');
+        return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span></td></tr>`;
+      }
+      const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): ''));
+      return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`;
+    }).join('');
+    // 横スクロールを可能にするため、テーブルのcol幅固定を外し、全体をoverflow:autoで包む
+    varsWrap.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:480px; border-collapse:collapse; font-size:12px;"><thead><tr><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">名前</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">型</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">値</th></tr></thead><tbody style="word-break:break-word;">${rows || '<tr><td colspan=\"3\" style=\"padding:6px; color:#9ba3af;\">変数がありません</td></tr>'}</tbody></table></div>`;
+    // Make variables draggable
+    varsWrap.querySelectorAll('.var-item').forEach(el=>{
+      el.addEventListener('dragstart', (e)=>{
+        const name = el.getAttribute('data-var') || el.textContent || '';
+        try{ e.dataTransfer.setData('text/plain', name); }catch{}
+        e.dataTransfer.effectAllowed = 'copy';
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
+    });
+  }catch{
+    varsWrap.innerHTML = '<div style="color:#9ba3af">変数の取得に失敗しました</div>';
+  }
+}
 
 function activateTab(which){ if(which==='code'){ rightCode.style.display='block'; rightVars.style.display='none'; tabCode?.classList.add('active'); tabVars?.classList.remove('active'); tabCode?.setAttribute('aria-selected','true'); tabVars?.setAttribute('aria-selected','false'); } else { rightCode.style.display='none'; rightVars.style.display='block'; tabVars?.classList.add('active'); tabCode?.classList.remove('active'); tabVars?.setAttribute('aria-selected','true'); tabCode?.setAttribute('aria-selected','false'); refreshVariables(); } }
 tabCode?.addEventListener('click', ()=> activateTab('code'));
 tabVars?.addEventListener('click', ()=> activateTab('vars'));
-previewModeEl?.addEventListener('change', ()=>{ render(); const plots = state.nodes.filter(x=> x.type==='pandas.Plot' || x.type==='sklearn.ClusterPlot'); if(plots.length){ state.lastPlotNodeId = plots[plots.length-1].id; } });
+previewModeEl?.addEventListener('change', ()=>{ render(); const figs = state.nodes.filter(isFigureNode); if(figs.length){ state.lastPlotNodeId = figs[figs.length-1].id; } });
 
-function syncEdgesViewport(){ const w = canvasWrap.clientWidth || canvasWrap.getBoundingClientRect().width; const h = canvasWrap.clientHeight || canvasWrap.getBoundingClientRect().height; if(w && h){ edgesSvg.setAttribute('width', String(Math.floor(w))); edgesSvg.setAttribute('height', String(Math.floor(h))); edgesSvg.setAttribute('viewBox', `0 0 ${Math.floor(w)} ${Math.floor(h)}`); } }
-function drawEdges(){ syncEdgesViewport(); edgesSvg.innerHTML=''; state.edges.forEach(e => { const from = document.querySelector(`[data-node-id="${e.from}"]`); const to = document.querySelector(`[data-node-id="${e.to}"]`); if (!from || !to) return; const a = centerOf(from.querySelector('.port.out')); const b = centerOf(to.querySelector('.port.in')); const path = document.createElementNS('http://www.w3.org/2000/svg','path'); const dx = Math.abs(b.x - a.x) * 0.5; const d = `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${b.x-dx} ${b.y}, ${b.x} ${b.y}`; path.setAttribute('d', d); path.setAttribute('class','edge'); edgesSvg.appendChild(path); }); }
+function syncEdgesViewport(){ syncEdgesViewportMod(canvasWrap, edgesSvg); }
+function drawEdges(){
+  drawEdgesMod(state, edgesSvg, nodesEl, canvasWrap);
+}
 function getPortCenter(nodeId, selector){ const nodeEl = document.querySelector(`[data-node-id="${nodeId}"]`); if(!nodeEl) return null; const port = nodeEl.querySelector(selector); if(!port) return null; return centerOf(port); }
-function setGhost(toX, toY){ let ghost = document.getElementById('ghost-edge'); if(!ghost){ ghost = document.createElementNS('http://www.w3.org/2000/svg','path'); ghost.id='ghost-edge'; ghost.setAttribute('class','edge'); ghost.setAttribute('stroke-dasharray','5,5'); edgesSvg.appendChild(ghost); } const a = getPortCenter(state.pendingSrc, '.port.out'); if(!a){ ghost.remove(); return; } const dx = Math.abs(toX - a.x) * 0.5; const d = `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${toX-dx} ${toY}, ${toX} ${toY}`; ghost.setAttribute('d', d); }
-function clearGhost(){ const ghost = document.getElementById('ghost-edge'); if(ghost) ghost.remove(); }
+function setGhost(toX, toY){ setGhostMod(state, edgesSvg, toX, toY); }
+function clearGhost(){ clearGhostMod(); }
 
-// Quick Add
-const quickAdd = document.createElement('div'); quickAdd.id='quickAdd'; Object.assign(quickAdd.style, { position:'absolute', display:'none', zIndex:'2000', background:'#0b1220', border:'1px solid #263041', borderRadius:'8px', minWidth:'260px', maxWidth:'320px', boxShadow:'0 8px 24px rgba(0,0,0,0.35)' }); quickAdd.innerHTML = `<div style="padding:8px 8px 0 8px; border-bottom:1px solid #263041"><input id="qaSearch" placeholder="Search nodes..." style="width:100%; padding:6px 8px; border:1px solid #2c3b52; border-radius:6px; background:#111824; color:var(--text)"></div><div id="qaSuggestedWrap" style="padding:8px; display:none"><div style="font-size:12px; opacity:0.8; margin-bottom:6px">Suggested</div><div id="qaSuggested" style="display:flex; flex-wrap:wrap; gap:6px"></div></div><div id="qaAll" style="max-height:240px; overflow:auto; padding:6px 0"></div>`; document.body.appendChild(quickAdd);
-function itemHtml(type){ const def = registry.nodes.get(type); const label = def?.title || type.split('.').slice(-1)[0] || type; return `<button data-type="${type}" style="display:block; width:100%; text-align:left; padding:8px 10px; background:transparent; color:var(--text); border:0; cursor:pointer">${label} <span style="opacity:0.6; font-size:12px">(${type})</span></button>`; }
-function buttonPill(type){ const def = registry.nodes.get(type); const label = def?.title || type.split('.').slice(-1)[0] || type; return `<button data-type="${type}" style="padding:6px 8px; background:#111824; color:var(--text); border:1px solid #263041; border-radius:999px; cursor:pointer">${label}</button>`; }
-function openQuickAdd(x, y, fromId){ const sWrap = quickAdd.querySelector('#qaSuggestedWrap'); const s = quickAdd.querySelector('#qaSuggested'); const all = quickAdd.querySelector('#qaAll'); const inp = quickAdd.querySelector('#qaSearch'); quickAdd.style.left = `${x}px`; quickAdd.style.top = `${y}px`; const sugg = suggestionsForNode(fromId); if(sugg.length){ sWrap.style.display='block'; s.innerHTML = sugg.map(buttonPill).join(''); } else { sWrap.style.display='none'; s.innerHTML=''; } const types = Array.from(registry.nodes.keys()).filter(t=> !(registry.nodes.get(t)?.hidden)); all.innerHTML = types.map(itemHtml).join(''); quickAdd.style.display = 'block'; const clickHandler = (ev)=>{ const btn = ev.target.closest('button[data-type]'); if(!btn) return; ev.preventDefault(); ev.stopPropagation(); const type = btn.getAttribute('data-type'); addAndConnect(type, fromId); closeQuickAdd(); }; quickAdd.addEventListener('click', clickHandler, { once: true }); inp.value=''; inp.oninput = ()=>{ const q = inp.value.toLowerCase(); const list = types.filter(t=> t.toLowerCase().includes(q) || (registry.nodes.get(t)?.title||'').toLowerCase().includes(q)); all.innerHTML = list.map(itemHtml).join(''); }; setTimeout(()=>{ const closeOnOutside = (e)=>{ if(!quickAdd.contains(e.target)){ closeQuickAdd(); document.removeEventListener('mousedown', closeOnOutside); } }; document.addEventListener('mousedown', closeOnOutside); }, 0); }
-function closeQuickAdd(){ quickAdd.style.display='none'; }
+// Quick Add (module)
+const openQuickAdd = (x, y, fromId)=> openQuickAddMod(x, y, fromId, suggestionsForNode, addAndConnect);
+const closeQuickAdd = ()=> closeQuickAddMod();
 function addAndConnect(type, fromId){ const srcEl = document.querySelector(`[data-node-id="${fromId}"]`); const x = (parseInt(srcEl?.style.left||'0')||0) + 280; const y = (parseInt(srcEl?.style.top||'0')||0); const n = addNode(type, x, y); state.edges = state.edges.filter(e=> !(e.from===fromId && e.to===n.id)); state.edges.push({ from: fromId, to: n.id }); selectNode(n.id); drawEdges(); refreshForms(); closeQuickAdd(); state.pendingSrc = null; render(); }
 
-function bindForm(el, node){ el.querySelectorAll('input,select,textarea').forEach(inp=>{ inp.addEventListener('change', ()=>{ node.params = node.params || {}; node.params[inp.name] = inp.value; if(node.type==='pandas.ReadCSV' && inp.name==='mode'){ el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node) }); bindForm(el, node); } refreshForms(); }); }); let varBtn = el.querySelector('.load-vars'); let varList = el.querySelector('.vars-list'); const body = el.querySelector('.body'); if(body && !varBtn){ const hasFreeText = !!body.querySelector('input:not([type="number"]):not([list])') || !!body.querySelector('textarea'); if(hasFreeText){ const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.alignItems = 'center'; wrap.style.gap = '6px'; wrap.style.marginTop = '6px'; wrap.innerHTML = '<button class="load-vars" type="button">Load Variables</button><span style="font-size:12px; opacity:0.8;">click to insert</span>'; body.appendChild(wrap); const list = document.createElement('div'); list.className = 'vars-list'; list.style.display = 'flex'; list.style.flexWrap = 'wrap'; list.style.gap = '6px'; list.style.marginTop = '6px'; body.appendChild(list); varBtn = wrap.querySelector('.load-vars'); varList = list; } } if(varBtn && varList){ varBtn.addEventListener('click', async (e)=>{ e.preventDefault(); try{ const res = await fetch('/api/variables'); const js = await res.json(); const arr = (Array.isArray(js.variables) ? js.variables : []).filter(v=>{ const t = String(v.type||'').toLowerCase(); const n = String(v.name||'').toLowerCase(); if(n==='exit' || n==='quit') return false; if(n==='in' || n==='out') return false; if(n.startsWith('_')) return false; if(t.includes('module')) return false; if(t.includes('function')) return false; if(t.includes('method')) return false; if(t.includes('autocall')) return false; if(t.includes('zmqexitautocall')) return false; return true; }); varList.innerHTML = arr.map(v=>`<button type="button" class="pill" data-name="${v.name}">${v.name}<span style="opacity:.6;font-size:11px;">:${v.type}</span></button>`).join(''); varList.querySelectorAll('button.pill').forEach(b=>{ b.addEventListener('click', ()=>{ const name = b.getAttribute('data-name'); const active = el.querySelector('input[name="expr"], textarea[name="assigns"], input:focus, textarea:focus'); if(active){ const start = active.selectionStart||active.value.length; const end = active.selectionEnd||start; const val = active.value||''; active.value = val.slice(0,start) + name + val.slice(end); active.dispatchEvent(new Event('change')); active.focus(); if(active.setSelectionRange){ const pos = start + name.length; active.setSelectionRange(pos,pos); } } }); }); }catch{} }); } const chooseBtn = el.querySelector('.choose-folder'); if(chooseBtn){ chooseBtn.addEventListener('click', async (e)=>{ e.preventDefault(); const info = el.querySelector('.folder-info'); const setInfo = (t)=>{ if(info) info.textContent = t; }; try{ if(window.showDirectoryPicker){ const dir = await window.showDirectoryPicker(); let firstCsv = null; let count=0; for await (const [name, handle] of dir.entries()){ if(handle.kind==='file' && name.toLowerCase().endsWith('.csv')){ const f = await handle.getFile(); const text = await f.text(); if(!firstCsv) firstCsv = { name, text }; count++; } } setInfo(`${count} CSV files found`); if(firstCsv){ node.params.mode='inline'; node.params.inline = firstCsv.text; el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node) }); bindForm(el, node); } } else { const input = document.createElement('input'); input.type='file'; input.multiple=true; input.webkitdirectory=true; input.style.display='none'; document.body.appendChild(input); input.addEventListener('change', async ()=>{ const files = Array.from(input.files||[]).filter(f=> f.name.toLowerCase().endsWith('.csv')); setInfo(`${files.length} CSV files selected`); if(files[0]){ const text = await files[0].text(); node.params.mode='inline'; node.params.inline = text; el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node) }); bindForm(el, node); } input.remove(); }, { once:true }); input.click(); } }catch(err){ setInfo('folder selection canceled'); } }); }
-  const chooseFile = el.querySelector('.choose-file'); if(chooseFile){ chooseFile.addEventListener('click', async (e)=>{ e.preventDefault(); try{ if(window.showOpenFilePicker){ const [fileHandle] = await window.showOpenFilePicker({ multiple:false }); const file = await fileHandle.getFile(); const pathInput = el.querySelector('input[name="path"]'); if(pathInput){ pathInput.value = file.name; node.params.path = file.name; } } else { const input = document.createElement('input'); input.type='file'; input.style.display='none'; document.body.appendChild(input); input.addEventListener('change', ()=>{ const f = input.files && input.files[0]; const pathInput = el.querySelector('input[name="path"]'); if(f && pathInput){ pathInput.value = f.name; node.params.path = f.name; } input.remove(); }, { once:true }); input.click(); } }catch{} }); }
-}
+// form binding is handled by forms.bindForm (imported)
 
-function createNodeEl(node){ const def = registry.nodes.get(node.type); const el = document.createElement('div'); el.className='node'; el.dataset.nodeId = node.id; el.style.left = (node.x||80) + 'px'; el.style.top = (node.y||80) + 'px'; const pmode = getPreviewMode(); const wantPreview = (pmode==='all') || (pmode==='plots' && (node.type==='pandas.Plot' || node.type==='sklearn.ClusterPlot')); const title = def?.title || node.type.split('.').slice(-1)[0]; const label = title; const typeLabel = node.type; el.innerHTML = `<div class="head"><div class="title">${label}</div><div class="type">${typeLabel}</div></div><div class="ports"><div class="port in"></div><div class="port out"></div></div><div class="body">${(typeof def.form==='function')? def.form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node) }): ''}</div><div class="preview" ${wantPreview? '':'style="display:none"'}><div id="prev-${node.id}"></div></div><div style="display:flex; gap:6px; padding:8px 10px; border-top:1px solid #263041"><button class="node-run" style="flex:1; background:#1f6feb; color:#fff; border:0; border-radius:6px; padding:6px 8px; cursor:pointer">Run</button><button class="node-del" title="Delete" style="background:#263041; color:#fff; border:0; border-radius:6px; padding:6px 8px; cursor:pointer">Del</button></div>`; el.querySelector('.node-del').addEventListener('click', ()=>{ deleteNodeById(node.id); render(); }); if(state.selectedNodeId === node.id){ el.classList.add('selected'); el.style.outline='2px solid #1f6feb'; }
-  let dragging=false, offX=0, offY=0; const head=el.querySelector('.head'); head.addEventListener('mousedown', e=>{ dragging=true; document.body.style.userSelect='none'; const rect = canvasWrap.getBoundingClientRect(); const left = parseInt(el.style.left||'0'), top = parseInt(el.style.top||'0'); offX = e.clientX - (rect.left + left); offY = e.clientY - (rect.top + top); }); window.addEventListener('mouseup', ()=>{ dragging=false; document.body.style.userSelect='auto'; drawEdges(); }); window.addEventListener('mousemove', e=>{ if(!dragging) return; const rect = canvasWrap.getBoundingClientRect(); const nx = Math.max(0, e.clientX - rect.left - offX); const ny = Math.max(0, e.clientY - rect.top - offY); el.style.left = nx + 'px'; el.style.top = ny + 'px'; node.x=nx; node.y=ny; drawEdges(); }); el.addEventListener('mousedown', (e)=>{ selectNode(node.id); e.stopPropagation(); }); const outPort = el.querySelector('.port.out'); const inPort = el.querySelector('.port.in'); outPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); state.pendingSrc = node.id; outPort.classList.add('selected'); const rect = canvasWrap.getBoundingClientRect(); openQuickAdd(ev.clientX - rect.left + 10, ev.clientY - rect.top + 10, node.id); }); inPort.addEventListener('click', (ev)=>{ ev.stopPropagation(); if(state.pendingSrc && state.pendingSrc!==node.id){ state.edges = state.edges.filter(e=> e.to!==node.id); state.edges.push({from: state.pendingSrc, to: node.id}); state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); drawEdges(); clearGhost(); refreshForms(); closeQuickAdd(); } }); bindForm(el, node); el.querySelector('.node-run').addEventListener('click', async ()=>{ if(node.type==='pandas.Plot' || node.type==='sklearn.ClusterPlot'){ state.lastPlotNodeId = node.id; } ensureWS(); statusEl.textContent='running...'; const code = genCodeUpTo(node.id); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js = {}; try{ js = await res.json(); }catch{} appendLog('Sent exec (node): ' + JSON.stringify(js)); statusEl.textContent='idle'; pendingVarsRefresh = !!(rightVars && rightVars.style.display!=='none'); }); const prev = el.querySelector(`#prev-${node.id}`); if(prev){ prev.addEventListener('click', (e)=>{ const img = prev.querySelector('img'); if(!img) return; openZoomOverlay(img.src); }); } return el; }
+function createNodeEl(node){
+  const def = registry.nodes.get(node.type);
+  const el = document.createElement('div');
+  el.className='node';
+  el.dataset.nodeId = node.id;
+  el.style.left = (node.x||80) + 'px';
+  el.style.top = (node.y||80) + 'px';
+  el.style.width = Math.max(160, node.w || 220) + 'px';
+  if(isSelected(node.id)) el.classList.add('selected');
+  const pmode = getPreviewMode();
+  const wantPreview = (pmode==='all') || (pmode==='plots' && isFigureNode(node));
+  const title = def?.title || node.type.split('.').slice(-1)[0];
+  const label = title; const typeLabel = node.type;
+  const previewH = Math.max(80, Math.min(500, node.prevH || 140));
+  el.innerHTML = `
+  <div class=\"head\">
+    <div class=\"title\">${label}</div>
+    <div class=\"type\">${typeLabel}</div>
+  </div>
+  <div class=\"ports\">
+    <div class=\"port in\"></div>
+    <div class=\"port out\"></div>
+  </div>
+  <div class=\"body\">${(typeof def.form==='function')? def.form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node), getUpstreamNode: ()=> upstreamOf(node) }): ''}</div>
+  <div class=\"preview\" ${wantPreview? '':'style=\"display:none\"'} style=\"max-height:${previewH}px\"> <div id=\"prev-${node.id}\"></div> <div class=\"node-resize-v\" title=\"Drag to resize preview height\"></div> </div>
+  <div class=\"actions\">
+    <button class=\"node-run btn-primary\">Run</button>
+    <button class=\"node-del btn-icon danger\" title=\"Delete\" aria-label=\"Delete\">${'<svg viewBox=\\"0 0 24 24\\" fill=\\"none\\" stroke=\\"currentColor\\" stroke-width=\\"2\\" stroke-linecap=\\"round\\" stroke-linejoin=\\"round\\"><polyline points=\\"3 6 5 6 21 6\\"></polyline><path d=\\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\\"></path><line x1=\\"10\\" y1=\\"11\\" x2=\\"10\\" y2=\\"17\\"></line><line x1=\\"14\\" y1=\\"11\\" x2=\\"14\\" y2=\\"17\\"></line></svg>'}</button>
+  </div>
+  <div class=\"node-resize-h\" title=\"Drag to resize width\"></div>`;
+  el.querySelector('.node-del').addEventListener('click', ()=>{ deleteNodeById(node.id); render(); saveToLocal(); });
+    // Run this node (exec upstream + this)
+    const runBtn = el.querySelector('.node-run');
+    if(runBtn){
+      runBtn.addEventListener('click', async ()=>{
+        await runWithBusy(async()=>{
+          ensureWS(); statusEl.textContent='running...';
+          const code = genCodeUpTo(node.id); genCodeEl.textContent = code;
+          const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+          let js={}; try{ js=await res.json(); }catch{}
+          appendLog('Sent exec (node '+node.id+'): ' + JSON.stringify(js));
+        }, runBtn, 'Running...');
+      });
+    }
+  // 追加: ノード右クリックメニュー
+  el.addEventListener('contextmenu', (e)=>{ e.preventDefault(); e.stopPropagation(); openNodeContextMenu(node.id, e.clientX, e.clientY); });
+  // 左クリック: 単一選択（フォーム/ポート/リサイズは除外）
+  el.addEventListener('mousedown', (e)=>{
+    if(e.button!==0) return;
+    if(e.target.closest('input, textarea, select, button, a, .port, .node-resize-h, .node-resize-v')) return;
+    if(e.shiftKey){
+      if(isSelected(node.id)) removeFromSelection(node.id); else addToSelection(node.id);
+    } else {
+      setSelection([node.id]);
+    }
+    refreshSelectionHighlight();
+    saveToLocal();
+  });
+  // ポート: 左クリック接続（Out -> In）とサジェスト表示
+  const outPort = el.querySelector('.port.out');
+  const inPort = el.querySelector('.port.in');
+  function clearPendingConnectionUI(){
+    state.pendingSrc = null;
+    try{ clearGhost(); }catch{}
+    try{ closeQuickAdd(); }catch{}
+    document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+  }
+  if(outPort){
+    outPort.addEventListener('mousedown', (e)=>{
+      if(e.button!==0) return;
+      e.preventDefault(); e.stopPropagation();
+      // トグル
+      if(state.pendingSrc===node.id){ clearPendingConnectionUI(); return; }
+      document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+      state.pendingSrc = node.id;
+      outPort.classList.add('selected');
+      // サジェスト(Quick Add)をポート付近に表示
+      const r = outPort.getBoundingClientRect();
+      const x = Math.round(r.right + 10);
+      const y = Math.round(r.top + r.height/2);
+      try{ openQuickAdd(x, y, node.id); }catch{}
+    });
+  }
+  if(inPort){
+    const finish = (e)=>{
+      if(e.button!==0) return;
+      if(!state.pendingSrc) return;
+      e.preventDefault(); e.stopPropagation();
+      const from = state.pendingSrc; const to = node.id;
+      if(from && from!==to){
+        const exists = state.edges.some(ed=> ed.from===from && ed.to===to);
+        if(!exists){ state.edges.push({ from, to }); drawEdges(); saveToLocal(); }
+      }
+      clearPendingConnectionUI();
+      render();
+    };
+    inPort.addEventListener('mouseup', finish);
+    inPort.addEventListener('click', finish);
+  }
+  // ...existing code...
+  return el; }
 
 function renderToolbar(){ toolbarEl.innerHTML = ''; if(!state.activePkg && registry.packages[0]) state.activePkg = registry.packages[0].name; (registry.packages || []).forEach(p=>{ const details = document.createElement('details'); details.className='pkg-section'; details.open = (state.activePkg === p.name); const summary = document.createElement('summary'); summary.textContent = p.label || p.name; Object.assign(summary.style, { cursor:'pointer', userSelect:'none', padding:'8px 10px' }); details.appendChild(summary); const listWrap = document.createElement('div'); listWrap.style.padding='8px 10px'; const list = (registry.byPackage.get(p.name) || []).filter(t=> !(registry.nodes.get(t)?.hidden)); list.forEach(type=>{ const def = registry.nodes.get(type); const btn = document.createElement('button'); btn.textContent = '➕ ' + (def.title || type); btn.dataset.type = type; btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); }); listWrap.appendChild(btn); }); details.appendChild(listWrap); details.addEventListener('toggle', ()=>{ if(details.open){ state.activePkg = p.name; document.querySelectorAll('#toolbar details.pkg-section').forEach(el=>{ if(el!==details) el.open=false; }); } }); toolbarEl.appendChild(details); }); }
 
-function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); drawEdges(); const code = genCode(); genCodeEl.textContent = code; refreshForms(); }
-function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindForm(el, n); } }); }
+function renderSubsystems(){
+  if(!subsystemsEl){ subsystemsEl = document.createElement('div'); subsystemsEl.id='subsystems'; subsystemsEl.style.marginTop = '12px'; toolbarEl.after(subsystemsEl); }
+  const items = state.groups || [];
+  subsystemsEl.innerHTML = `
+    <div style="padding:8px 10px; border-top:1px solid #1f2329; font-weight:600;">Subsystems</div>
+    <div style="padding:8px 10px; display:flex; flex-direction:column; gap:6px;">
+      ${items.length? items.map(g=>`<div class="sub-item" data-gid="${g.id}" style="display:flex; gap:6px; align-items:center; justify-content:space-between;"><span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${g.name}">${g.name}</span><span style="font-size:11px; color:#9ba3af">${g.nodeIds.length} nodes</span><span style="margin-left:auto"></span><button class="run-sub" data-gid="${g.id}">Run</button><button class="del-sub" data-gid="${g.id}">Delete</button></div>`).join('') : '<div style="padding:6px; color:#9ba3af;">No subsystems</div>'}
+    </div>`;
+  subsystemsEl.querySelectorAll('.run-sub').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const gid = btn.getAttribute('data-gid'); const g = getGroup(gid); if(!g) return;
+      await runWithBusy(async ()=>{
+        ensureWS(); statusEl.textContent='running...';
+        const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code;
+  const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
+  appendLog('Sent exec (group): ' + JSON.stringify(js));
+      }, btn, 'Running...');
+    });
+  });
+  subsystemsEl.querySelectorAll('.del-sub').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ const gid = btn.getAttribute('data-gid'); state.groups = state.groups.filter(x=> x.id!==gid); renderSubsystems(); saveToLocal(); });
+  });
+}
+
+function ensureGroupsLayer(){ if(!groupsLayer){ groupsLayer = document.createElement('div'); groupsLayer.id='groupsLayer'; groupsLayer.style.position='absolute'; groupsLayer.style.inset='0'; nodesEl.appendChild(groupsLayer); } groupsLayer.innerHTML=''; }
+function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) return; const scale=getScale();
+  state.groups.forEach(g=>{
+    // 存在しないノードIDを除去（枠は残す）
+    g.nodeIds = (g.nodeIds||[]).filter(id=> !!getNode(id));
+    // バウンディングボックス計算（折りたたみ時は最後のframeを利用）
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    const nodeEls = (g.nodeIds||[]).map(id=> document.querySelector(`[data-node-id="${id}"]`)).filter(Boolean);
+    if(nodeEls.length){
+      nodeEls.forEach(el=>{ const id=el.dataset.nodeId; const n=getNode(id); const r=el.getBoundingClientRect(); const w=r.width/scale, h=r.height/scale; const x=n?.x||0, y=n?.y||0; minX=Math.min(minX,x); minY=Math.min(minY,y); maxX=Math.max(maxX,x+w); maxY=Math.max(maxY,y+h); });
+    } else if(g.frame){
+      // ノードがすべて削除されても枠は維持（前回保存のframe）
+      const f=g.frame; minX=f.x; minY=f.y; maxX=f.x+f.w; maxY=f.y+f.h;
+    } else {
+      // 初期サイズ（空の枠）
+      minX=80; minY=60; maxX=260; maxY=180;
+    }
+    const margin=16; const left=(minX-margin), top=(minY-margin), width=(maxX-minX+margin*2), height=(maxY-minY+margin*2);
+    g.frame = { x:left, y:top, w:width, h:height };
+    const frame=document.createElement('div'); frame.className='group-frame'; frame.style.left=left+'px'; frame.style.top=top+'px'; frame.style.width=width+'px'; frame.style.height=height+'px';
+    if(g.collapsed) frame.classList.add('collapsed');
+    const title=document.createElement('div'); title.className='title'; title.textContent=g.name||'Subsystem'; frame.appendChild(title);
+    const actions=document.createElement('div'); actions.className='actions'; actions.innerHTML=`<button class="toggle">${g.collapsed?'Expand':'Collapse'}</button><button class="run">RUN</button><button class="copy">Copy</button><button class="del">Delete</button>`; frame.appendChild(actions);
+    // タイトルドラッグでグループ移動
+    let dragging=false,start=null,starts=null;
+    title.addEventListener('mousedown',(e)=>{ if(e.button!==0) return; dragging=true; document.body.style.userSelect='none'; start=screenToWorldPoint(e.clientX,e.clientY); starts=(g.nodeIds||[]).map(id=>{ const n=getNode(id); return {id,x:n?.x||0,y:n?.y||0}; }); e.stopPropagation(); });
+    const onMove=(e)=>{ if(!dragging) return; const p=screenToWorldPoint(e.clientX,e.clientY); const dx=p.x-start.x, dy=p.y-start.y; (starts||[]).forEach(s=>{ const n=getNode(s.id); if(!n) return; n.x=s.x+dx; n.y=s.y+dy; const el=document.querySelector(`[data-node-id="${s.id}"]`); if(el){ el.style.left=n.x+'px'; el.style.top=n.y+'px'; } }); drawEdges(); frame.style.left=(left+dx)+'px'; frame.style.top=(top+dy)+'px'; };
+    const onUp=()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; g.frame = { x: parseFloat(frame.style.left)||left, y: parseFloat(frame.style.top)||top, w: width, h: height }; renderGroups(); saveToLocal(); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once:true });
+
+    actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
+    actions.querySelector('.run').addEventListener('click', async (e)=>{
+      e.stopPropagation(); await runWithBusy(async ()=>{
+  ensureWS(); statusEl.textContent='running...'; const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
+      }, actions.querySelector('.run'));
+    });
+    actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
+    actions.querySelector('.del').addEventListener('click', (e)=>{ e.stopPropagation(); state.groups = state.groups.filter(x=> x!==g); render(); });
+    groupsLayer.appendChild(frame);
+
+    // 折りたたみ時はノードを簡易的に非表示（実データは保持）
+    if(g.collapsed){
+      (g.nodeIds||[]).forEach(id=>{ const el=document.querySelector(`[data-node-id="${id}"]`); if(el){ el.style.display='none'; } });
+    } else {
+      (g.nodeIds||[]).forEach(id=>{ const el=document.querySelector(`[data-node-id="${id}"]`); if(el){ el.style.display=''; } });
+    }
+  });
+}
+function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); applyViewTransform(); drawEdges(); const code = genCode(); genCodeEl.textContent = code; refreshForms(); renderSubsystems(); renderGroups(); updateRunButtonsState(); saveToLocal(); }
+function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n), getUpstreamNode: ()=> upstreamOf(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindFormMod(el, n, refreshForms); } }); }
 
 // WebSocket & streaming
-let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> appendLog('[ws] connected'); ws.onclose = ()=> appendLog('[ws] closed'); ws.onmessage = ev => { const data = JSON.parse(ev.data); if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && (n.type==='pandas.Plot'||n.type==='sklearn.ClusterPlot'))); if(!want) continue; if(n && n.type==='pandas.Plot' && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ state.stream.currentNodeId = mb[1]; state.preview.head.delete(mb[1]); state.preview.desc.delete(mb[1]); state.preview.headHtml.delete(mb[1]); state.preview.descHtml.delete(mb[1]); state.stream.buffers.set(mb[1], ''); const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && (n.type==='pandas.Plot'||n.type==='sklearn.ClusterPlot'))); if(allowText){ if(!(n && n.type==='pandas.Plot')){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && (n.type==='pandas.Plot'||n.type==='sklearn.ClusterPlot')) || !tgt){ const plots = state.nodes.filter(x=> x.type==='pandas.Plot' || x.type==='sklearn.ClusterPlot'); if(plots.length){ nid = plots[plots.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && (n.type==='pandas.Plot'||n.type==='sklearn.ClusterPlot'))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && (n.type==='pandas.Plot'||n.type==='sklearn.ClusterPlot')){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle' && pendingVarsRefresh){ pendingVarsRefresh = false; refreshVariables(); } } }; }
+let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ state.stream.currentNodeId = mb[1]; state.preview.head.delete(mb[1]); state.preview.desc.delete(mb[1]); state.preview.headHtml.delete(mb[1]); state.preview.descHtml.delete(mb[1]); state.stream.buffers.set(mb[1], ''); const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
 
-function updateNodePreview(id){ const tgt = document.getElementById('prev-' + id); if(!tgt) return; const n = getNode(id); if(n && n.type==='pandas.Plot'){ return; } const hHtml = state.preview.headHtml.get(id); const dHtml = state.preview.descHtml.get(id); const hTxt = state.preview.head.get(id); const dTxt = state.preview.desc.get(id); const headPart = hHtml ? styleTableHtml(hHtml) : (hTxt ? `<pre style="margin:0; white-space:pre-wrap">${hTxt.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>` : ''); const descPart = dHtml ? styleTableHtml(dHtml) : (dTxt ? `<pre style="margin:0; white-space:pre-wrap">${dTxt.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>` : ''); if(!headPart && !descPart){ return; } const oldImg = tgt.querySelector('img'); tgt.innerHTML = `<div class="node-preview-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:8px; align-items:start;"><div>${headPart || ''}</div><div>${descPart || ''}</div></div>`; if(oldImg){ tgt.appendChild(oldImg); } }
+function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id); }
 
-// Background events
-canvasWrap.addEventListener('click', ()=>{ state.pendingSrc=null; document.querySelectorAll('.port.selected').forEach(p=> p.classList.remove('selected')); clearGhost(); clearSelection(); closeQuickAdd(); });
-window.addEventListener('resize', drawEdges); window.addEventListener('scroll', drawEdges, { passive: true }); canvasWrap.addEventListener('scroll', drawEdges, { passive: true }); window.addEventListener('mousemove', (e)=>{ if(!state.pendingSrc) return; const rect = edgesSvg.getBoundingClientRect(); const x=e.clientX - rect.left; const y=e.clientY - rect.top; setGhost(x, y); });
-window.addEventListener('keydown', (e)=>{ if(e.key !== 'Delete') return; const a = document.activeElement; const tag = (a && a.tagName) ? a.tagName.toLowerCase() : ''; if(tag === 'input' || tag === 'textarea' || (a && a.isContentEditable)) return; if(state.selectedNodeId){ e.preventDefault(); deleteNodeById(state.selectedNodeId); render(); } });
+export async function boot(){
+  await loadPackages();
+  renderToolbar();
+  applyViewTransform();
+  // try restore
+  try { restoreFromLocal(); } catch {}
 
-// Zoom overlay
-let zoomOverlay; function ensureOverlay(){ if(zoomOverlay) return zoomOverlay; const ov = document.createElement('div'); Object.assign(ov.style, { position:'fixed', left:'0', top:'0', right:'0', bottom:'0', background:'rgba(0,0,0,0.8)', display:'none', zIndex:'9999' }); ov.innerHTML = `<div id="zoomWrap" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; cursor:grab;"><img id="zoomImg" src="" style="max-width:90%; max-height:90%; transform:scale(1); transition:transform 0.05s ease-out;" /></div><button id="zoomClose" style="position:absolute; top:12px; right:12px; padding:8px 12px; border:0; border-radius:6px; background:#1f6feb; color:#fff; cursor:pointer">Close</button>`; document.body.appendChild(ov); const img = ov.querySelector('#zoomImg'); const wrap = ov.querySelector('#zoomWrap'); ov.querySelector('#zoomClose').addEventListener('click', ()=>{ ov.style.display='none'; img.style.transform='scale(1)'; scale=1; }); ov.addEventListener('click', (e)=>{ if(e.target===ov) { ov.style.display='none'; img.style.transform='scale(1)'; scale=1; } }); let scale=1; ov.addEventListener('wheel', (e)=>{ e.preventDefault(); const delta = Math.sign(e.deltaY); scale *= (delta>0? 0.9:1.1); scale = Math.min(10, Math.max(0.2, scale)); img.style.transform = `scale(${scale})`; }, { passive:false }); let dragging=false, sx=0, sy=0; wrap.addEventListener('mousedown', (e)=>{ dragging=true; wrap.style.cursor='grabbing'; sx=e.clientX; sy=e.clientY; }); window.addEventListener('mouseup', ()=>{ dragging=false; wrap.style.cursor='grab'; wrap.style.transform='translate(0,0)'; }); window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx=e.clientX-sx; const dy=e.clientY-sy; wrap.style.transform = `translate(${dx}px, ${dy}px)`; }); zoomOverlay = ov; return ov; } function openZoomOverlay(src){ const ov = ensureOverlay(); const img = ov.querySelector('#zoomImg'); const wrap = ov.querySelector('#zoomWrap'); img.src = src; img.style.transform='scale(1)'; wrap.style.transform='translate(0,0)'; ov.style.display='block'; }
+  // Buttons
+  document.getElementById('sampleBtn').addEventListener('click', ()=>{
+    state.nodes=[]; state.edges=[]; state.nextId=1; state.groups=[];
+    const n1 = addNode('pandas.ReadCSV', 60, 60);
+    const n2 = addNode('pandas.FilterRows', 340, 80);
+    const n3 = addNode('pandas.XYPlot', 620, 100);
+    state.edges.push({from:n1.id,to:n2.id},{from:n2.id,to:n3.id});
+    setSelection([]);
+    render();
+  });
 
-export async function boot(){ await loadPackages(); renderToolbar(); document.getElementById('sampleBtn').addEventListener('click', ()=>{ state.nodes=[]; state.edges=[]; state.nextId=1; const n1 = addNode('pandas.ReadCSV', 60, 60); const n2 = addNode('pandas.FilterRows', 340, 80); const n3 = addNode('pandas.Plot', 620, 100); state.edges.push({from:n1.id,to:n2.id},{from:n2.id,to:n3.id}); render(); }); document.getElementById('installBtn').addEventListener('click', async ()=>{ statusEl.textContent='installing...'; appendLog('Installing requirements...'); const res = await fetch('/bootstrap', { method:'POST' }); const js = await res.json().catch(()=>({})); appendLog(js.output ? js.output : JSON.stringify(js)); statusEl.textContent='idle'; }); document.getElementById('restartBtn').addEventListener('click', async ()=>{ appendLog('[kernel] restarting...'); statusEl.textContent='restarting...'; try{ const res = await fetch('/restart', { method:'POST' }); const js = await res.json().catch(()=>({})); appendLog('[kernel] restarted ' + JSON.stringify(js)); }catch(e){ appendLog('[kernel] restart error'); } statusEl.textContent='idle'; try{ if(ws) ws.close(); }catch{} ensureWS(); }); ensureWS(); render(); }
+  document.getElementById('installBtn').addEventListener('click', async ()=>{
+    statusEl.textContent='installing...';
+    appendLog('Installing requirements...');
+    const res = await fetch('/bootstrap', { method:'POST' });
+    const js = await res.json().catch(()=>({}));
+    appendLog(js.output ? js.output : JSON.stringify(js));
+    statusEl.textContent='idle';
+  });
+
+  document.getElementById('restartBtn').addEventListener('click', async ()=>{
+    if(kernelDisabled){ appendLog('[kernel] feature disabled'); return; }
+    appendLog('[kernel] restarting...');
+    statusEl.textContent='restarting...';
+    try{
+      const res = await fetch('/restart', { method:'POST' });
+      const js = await res.json().catch(()=>({}));
+      appendLog('[kernel] restarted ' + JSON.stringify(js));
+    }catch(e){
+      appendLog('[kernel] restart error');
+    }
+    statusEl.textContent='idle';
+    try{ if(ws) ws.close(); }catch{}
+    ensureWS();
+  });
+
+  // Initial kernel availability check
+  try{
+    const res = await fetch('/health');
+    const js = await res.json();
+    if(js && js.kernel === 'disabled'){
+      kernelDisabled = true;
+      statusEl.textContent = 'kernel disabled';
+      appendLog('[kernel] feature disabled');
+    }
+  }catch{}
+
+  // always reset kernel variables on page load
+  if(!kernelDisabled){
+    try{
+      await fetch('/restart', { method:'POST' });
+      appendLog('[kernel] restarted on load');
+    }catch{}
+  }
+  ensureWS();
+  render();
+  // 画像クリックで拡大
+  document.addEventListener('click', (e)=>{
+    const img = e.target && e.target.tagName==='IMG' ? e.target : null;
+    if(img && img.closest('.preview')){
+      try{ openZoomOverlay(img.src); }catch{}
+    }
+  });
+  // グループ更新イベントで再描画
+  document.addEventListener('pf:groups:changed', ()=>{ try{ renderSubsystems(); renderGroups(); saveToLocal(); }catch{} });
+  // マウス座標の追跡（キーボード貼り付け位置用）
+  canvasWrap.addEventListener('mousemove', (e)=>{ lastMouseWorld = screenToWorldPoint(e.clientX, e.clientY); });
+  // キーボードショートカット（コピー/切り取り/貼り付け/複製/削除）
+  window.addEventListener('keydown', (e)=>{
+    const t = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+    if(t==='INPUT' || t==='TEXTAREA' || t==='SELECT') return;
+    const ids = Array.from(state.selection||[]);
+    const withCtrl = (e.ctrlKey||e.metaKey);
+    if(withCtrl && e.key.toLowerCase()==='c'){
+      if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; }catch{ clipboardGraph=null; } }
+      e.preventDefault();
+    } else if(withCtrl && e.key.toLowerCase()==='x'){
+      if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch{} }
+      e.preventDefault();
+    } else if(withCtrl && e.key.toLowerCase()==='v'){
+      const g = window.__pf_clipboardGraph || clipboardGraph;
+      if(g){ try{ const newIds = pasteSubgraph(g, { x:(lastMouseWorld.x||100), y:(lastMouseWorld.y||100) }); setSelection(newIds); render(); saveToLocal(); }catch{} }
+      e.preventDefault();
+    } else if(withCtrl && e.key.toLowerCase()==='d'){
+      if(ids.length){ try{ const data = makeSubgraph(ids); const newIds = pasteSubgraph(data, { x:(lastMouseWorld.x||100)+20, y:(lastMouseWorld.y||100)+20 }); setSelection(newIds); render(); saveToLocal(); }catch{} }
+      e.preventDefault();
+    } else if(e.key==='Delete'){
+      if(ids.length){ try{ deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch{} }
+      e.preventDefault();
+    } else if(e.key==='Escape'){
+      if(state.pendingSrc){ try{ clearGhost(); }catch{} try{ closeQuickAdd(); }catch{} state.pendingSrc=null; document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected')); e.preventDefault(); }
+    }
+  });
+  // 接続モード中に外側をクリックしたらキャンセル
+  document.addEventListener('mousedown', (e)=>{
+    try{
+      if(state.pendingSrc && !e.target.closest('.port') && !e.target.closest('#quickAdd')){
+        state.pendingSrc = null; clearGhost(); closeQuickAdd(); document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+      }
+    }catch{}
+  });
+  // 追加: インタラクション初期化（最後に呼ぶ）
+  window.__pf_clipboardGraph = clipboardGraph;
+  initInteractionsMod({
+    state,
+    canvasWrap,
+    nodesEl,
+    edgesSvg,
+    getScale,
+    getTx,
+    getTy,
+    screenToWorldPoint,
+    applyViewTransform,
+    drawEdges,
+    saveToLocal
+  });
+}
