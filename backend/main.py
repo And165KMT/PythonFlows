@@ -1,5 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import asyncio
@@ -14,7 +14,10 @@ import sys
 from typing import Optional
 import os
 import time
-from .config import kernel_feature_enabled
+from .config import kernel_feature_enabled, auth_required, get_api_token, exec_timeout_seconds, export_max_rows_default
+from .auth import require_auth, require_ws_auth
+from .flows import list_flows, save_flow, load_flow, delete_flow
+from .exec_control import exec_registry, enforce_timeout_and_interrupt
 
 nest_asyncio.apply()
 
@@ -68,12 +71,18 @@ async def shutdown():
         kernel_manager.shutdown_kernel(now=True)
 
 @app.post("/run")
-async def run_graph(body: dict):
+async def run_graph(body: dict, _: bool = Depends(require_auth)):
     """Run a tiny fixed Pandas flow on the kernel and return an execution id.
     For MVP: CSV -> Select -> GroupBy -> Plot (saved to a PNG file path and return path)
     """
     if not kernel_feature_enabled():
         return JSONResponse({"error": "kernel feature disabled"}, status_code=403)
+    # optional auth
+    # use dependency manually to avoid changing handler signature
+    try:
+        await asyncio.to_thread(lambda: None)
+    except Exception:
+        pass
     exec_id = str(uuid.uuid4())
     code = body.get("code")
     if not code:
@@ -82,10 +91,17 @@ async def run_graph(body: dict):
     if kc is None:
         return JSONResponse({"error": "kernel not ready"}, status_code=503)
     msg_id = kc.execute(code)
+    # Register timeout watcher if configured
+    if exec_timeout_seconds() > 0:
+        try:
+            await exec_registry.register(msg_id, time.time())
+            asyncio.create_task(enforce_timeout_and_interrupt(kernel_manager, kc, msg_id))
+        except Exception:
+            pass
     return {"execId": exec_id, "msgId": msg_id}
 
 @app.get("/api/variables")
-async def list_variables():
+async def list_variables(_: bool = Depends(require_auth)):
     """Execute a short snippet on the kernel to list global variables and return as JSON."""
     if not kernel_feature_enabled():
         return {"variables": []}
@@ -168,12 +184,12 @@ async def list_variables():
 @app.get("/health")
 async def health():
     if not kernel_feature_enabled():
-        return {"kernel": "disabled"}
+        return {"kernel": "disabled", "auth": "required" if auth_required() else "optional"}
     ok = bool(kernel_manager)
-    return {"kernel": "ok" if ok else "down"}
+    return {"kernel": "ok" if ok else "down", "auth": "required" if auth_required() else "optional"}
 
 @app.post("/restart")
-async def restart_kernel():
+async def restart_kernel(_: bool = Depends(require_auth)):
     """Restart the single Jupyter kernel."""
     if not kernel_feature_enabled():
         return JSONResponse({"error": "kernel feature disabled"}, status_code=403)
@@ -239,6 +255,9 @@ async def ws_stream(ws: WebSocket):
         await ws.send_text(json.dumps({"type": "error", "content": {"message": "kernel feature disabled"}}))
         await ws.close()
         return
+    # auth if required
+    if not await require_ws_auth(ws):
+        return
     await ws.accept()
     try:
         while True:
@@ -263,3 +282,159 @@ async def ws_stream(ws: WebSocket):
         pass
     except Exception:
         await ws.close()
+
+
+# ------------------- Flows API -------------------
+
+@app.get("/api/flows")
+async def api_list_flows(_: bool = Depends(require_auth)):
+    return {"items": list_flows()}
+
+
+@app.get("/api/flows/{name}.json")
+async def api_get_flow(name: str, _: bool = Depends(require_auth)):
+    try:
+        data = load_flow(name)
+        return data
+    except FileNotFoundError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+
+@app.post("/api/flows/{name}.json")
+async def api_save_flow(name: str, body: dict, _: bool = Depends(require_auth)):
+    try:
+        p = save_flow(name, body)
+        return {"ok": True, "path": str(p)}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/flows/{name}.json")
+async def api_delete_flow(name: str, _: bool = Depends(require_auth)):
+    try:
+        ok = delete_flow(name)
+        if ok:
+            return {"ok": True}
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ------------------- Variable export -------------------
+
+@app.get("/api/variables/{name}/export")
+async def export_variable(name: str, format: str = "csv", rows: Optional[int] = None, _: bool = Depends(require_auth)):
+    if not kernel_feature_enabled():
+        return JSONResponse({"error": "kernel feature disabled"}, status_code=403)
+    if kc is None:
+        return JSONResponse({"error": "kernel not ready"}, status_code=503)
+    fmt = (format or "csv").lower()
+    max_rows = export_max_rows_default()
+    nrows = max(1, min(max_rows, int(rows or max_rows)))
+    # Build code to serialize the variable
+    code = (
+        "import json, io\n"
+        "import types\n"
+        "def __fp_export(name, fmt, nrows):\n"
+        "    try:\n"
+        "        import pandas as pd\n"
+        "    except Exception:\n"
+        "        pd = None\n"
+        "    try:\n"
+        "        import numpy as np\n"
+        "    except Exception:\n"
+        "        np = None\n"
+        "    v = globals().get(name, None)\n"
+        "    if fmt=='csv':\n"
+        "        try:\n"
+        "            if pd is not None and getattr(v, '__class__', None) is not None and v.__class__.__name__=='DataFrame':\n"
+        "                buf = io.StringIO()\n"
+        "                v.head(int(nrows)).to_csv(buf, index=False)\n"
+        "                print('[[EXPORT:CSV]]'+buf.getvalue())\n"
+        "                return\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        try:\n"
+        "            if np is not None and hasattr(v, 'shape'):\n"
+        "                arr = v\n"
+        "                try:\n"
+        "                    import numpy as _np\n"
+        "                    arr = _np.array(v)\n"
+        "                except Exception:\n"
+        "                    pass\n"
+        "                s = arr.shape if hasattr(arr, 'shape') else None\n"
+        "                if s is None:\n"
+        "                    print('[[EXPORT:TEXT]]'+str(v))\n"
+        "                    return\n"
+        "                # handle 1D/2D; higher dims -> reshape to 2D\n"
+        "                try:\n"
+        "                    if len(s)==1:\n"
+        "                        arr2 = arr.reshape(-1,1)\n"
+        "                    elif len(s)>=2:\n"
+        "                        arr2 = arr.reshape(s[0], -1)\n"
+        "                    else:\n"
+        "                        arr2 = arr\n"
+        "                    arr2 = arr2[:int(nrows)]\n"
+        "                    buf = io.StringIO()\n"
+        "                    for r in arr2:\n"
+        "                        try:\n"
+        "                            it = list(r)\n"
+        "                        except Exception:\n"
+        "                            it = [r]\n"
+        "                        buf.write(','.join(str(x) for x in it))\n"
+        "                        buf.write('\n')\n"
+        "                    print('[[EXPORT:CSV]]'+buf.getvalue())\n"
+        "                    return\n"
+        "                except Exception:\n"
+        "                    pass\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    # fallback\n"
+        "    try:\n"
+        "        print('[[EXPORT:TEXT]]'+repr(v))\n"
+        "    except Exception:\n"
+        "        print('[[EXPORT:TEXT]]<unrepr>')\n"
+        f"__fp_export('{name}', '{fmt}', {nrows})\n"
+    )
+    payload = []
+    kind = None  # 'CSV' or 'TEXT'
+    deadline = time.time() + 5.0
+    async with iopub_gate:
+        msg_id = kc.execute(code)
+        if exec_timeout_seconds() > 0:
+            try:
+                await exec_registry.register(msg_id, time.time())
+                asyncio.create_task(enforce_timeout_and_interrupt(kernel_manager, kc, msg_id))
+            except Exception:
+                pass
+        try:
+            while time.time() < deadline:
+                try:
+                    msg = kc.get_iopub_msg(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+                mtype = msg.get("header", {}).get("msg_type")
+                content = msg.get("content", {})
+                if mtype == "stream":
+                    text = content.get("text", "")
+                    if text.startswith("[[EXPORT:CSV]]"):
+                        payload.append(text[len("[[EXPORT:CSV]]"):])
+                        kind = "CSV"
+                    elif text.startswith("[[EXPORT:TEXT]]"):
+                        payload.append(text[len("[[EXPORT:TEXT]]"):])
+                        kind = "TEXT"
+                elif mtype == "status" and content.get("execution_state") == "idle":
+                    break
+        except Exception:
+            pass
+    data = "".join(payload)
+    if not data:
+        return JSONResponse({"error": "no data"}, status_code=500)
+    filename = f"{name}.{ 'csv' if kind=='CSV' else 'txt'}"
+    media = "text/csv" if kind == "CSV" else "text/plain"
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    return StreamingResponse(iter([data]), media_type=media, headers=headers)

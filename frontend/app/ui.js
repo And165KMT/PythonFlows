@@ -32,6 +32,14 @@ let lastMouseWorld = { x: 100, y: 100 };
 let isSpaceDown = false; // hold Space for panning
 let panning = false; let panStart = null; let panStartView = null;
 let kernelDisabled = false; // backend gated kernel feature
+let authRequired = false; // backend may require token
+let authToken = null; // API token stored in sessionStorage when set
+
+// Auth helpers
+function getStoredToken(){ try{ return sessionStorage.getItem('pf_token'); }catch{ return null; } }
+function setStoredToken(tok){ authToken = tok || null; try{ if(authToken) sessionStorage.setItem('pf_token', authToken); else sessionStorage.removeItem('pf_token'); }catch{} }
+function apiHeaders(extra){ const h = Object.assign({}, extra||{}); if(authRequired && authToken){ h['Authorization'] = 'Bearer ' + authToken; } return h; }
+async function apiFetch(url, opts){ const o = Object.assign({ method:'GET' }, opts||{}); o.headers = apiHeaders(o.headers||{}); return fetch(url, o); }
 
 // inject minimal styles for spinner and group frames
 injectBaseStyles();
@@ -101,7 +109,7 @@ const globalRunBtn = document.createElement('button'); globalRunBtn.textContent=
   await runWithBusy(async ()=>{
     ensureWS(); clearLog(); statusEl.textContent='running...';
     const code = genCode(); genCodeEl.textContent = code;
-    const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+    const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
     let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec: ' + JSON.stringify(js));
   }, globalRunBtn, 'Running...');
@@ -171,7 +179,7 @@ function filterVars(arr){ try{ return (arr||[]).filter(v=>{ const t = String(v.t
 async function refreshVariables(){
   if(!rightVars || rightVars.style.display==='none') return;
   try{
-    const res = await fetch('/api/variables');
+    const res = await apiFetch('/api/variables');
     const js = await res.json();
     const arrRaw = Array.isArray(js.variables) ? js.variables : [];
     const arr = filterVars(arrRaw);
@@ -182,13 +190,15 @@ async function refreshVariables(){
       const tLower = String(v.type).toLowerCase();
       if(tLower==='dataframe' && v.html){
         const dims = (typeof v.rows==='number' && typeof v.cols==='number') ? `<div style="color:var(--sub); font-size:11px; margin-top:4px">${v.rows.toLocaleString()} rows × ${v.cols.toLocaleString()} cols</div>` : '';
+        const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
         // wrap DataFrame HTML in a horizontally scrollable container so全列閲覧可
-        return `<tr><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}</td></tr>`;
+        return `<tr><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${csvBtn}</td></tr>`;
       }
       if(tLower==='ndarray'){
         const shp = Array.isArray(v.shape)? `shape=${escapeHtml(String(v.shape))}` : '';
         const val = (v.repr!=null? String(v.repr): '');
-        return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span></td></tr>`;
+        const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
+        return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${csvBtn}</td></tr>`;
       }
       const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): ''));
       return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`;
@@ -204,6 +214,27 @@ async function refreshVariables(){
         el.classList.add('dragging');
       });
       el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
+    });
+    // CSV export buttons
+    varsWrap.querySelectorAll('.var-csv').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const name = btn.getAttribute('data-var'); if(!name) return;
+        try{
+          const url = `/api/variables/${encodeURIComponent(name)}/export?format=csv`;
+          const res2 = await apiFetch(url);
+          const ct = (res2.headers.get('content-type')||'').toLowerCase();
+          if(ct.includes('application/json')){
+            const j = await res2.json().catch(()=>({}));
+            appendLog('[export] error ' + JSON.stringify(j));
+            return;
+          }
+          const blob = await res2.blob();
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `${name}.csv`;
+          document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+        }catch(e){ appendLog('[export] failed'); }
+      });
     });
   }catch{
     varsWrap.innerHTML = '<div style="color:#9ba3af">変数の取得に失敗しました</div>';
@@ -268,7 +299,7 @@ function createNodeEl(node){
         await runWithBusy(async()=>{
           ensureWS(); statusEl.textContent='running...';
           const code = genCodeUpTo(node.id); genCodeEl.textContent = code;
-          const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+          const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
           let js={}; try{ js=await res.json(); }catch{}
           appendLog('Sent exec (node '+node.id+'): ' + JSON.stringify(js));
         }, runBtn, 'Running...');
@@ -348,7 +379,7 @@ function renderSubsystems(){
       await runWithBusy(async ()=>{
         ensureWS(); statusEl.textContent='running...';
         const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code;
-  const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
+  const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec (group): ' + JSON.stringify(js));
       }, btn, 'Running...');
     });
@@ -392,7 +423,7 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
     actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
     actions.querySelector('.run').addEventListener('click', async (e)=>{
       e.stopPropagation(); await runWithBusy(async ()=>{
-  ensureWS(); statusEl.textContent='running...'; const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
+  ensureWS(); statusEl.textContent='running...'; const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
       }, actions.querySelector('.run'));
     });
     actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
@@ -411,7 +442,7 @@ function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendC
 function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n), getUpstreamNode: ()=> upstreamOf(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindFormMod(el, n, refreshForms); } }); }
 
 // WebSocket & streaming
-let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws'); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ state.stream.currentNodeId = mb[1]; state.preview.head.delete(mb[1]); state.preview.desc.delete(mb[1]); state.preview.headHtml.delete(mb[1]); state.preview.descHtml.delete(mb[1]); state.stream.buffers.set(mb[1], ''); const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&gt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
+let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ state.stream.currentNodeId = mb[1]; state.preview.head.delete(mb[1]); state.preview.desc.delete(mb[1]); state.preview.headHtml.delete(mb[1]); state.preview.descHtml.delete(mb[1]); state.stream.buffers.set(mb[1], ''); const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
 
 function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id); }
 
@@ -421,6 +452,47 @@ export async function boot(){
   applyViewTransform();
   // try restore
   try { restoreFromLocal(); } catch {}
+
+  // Add extra actions (auth/flows)
+  const actionsEl = document.getElementById('actions');
+  const signBtn = document.createElement('button'); signBtn.id='signBtn'; signBtn.className='secondary'; signBtn.textContent='Sign in';
+  const saveFlowBtn = document.createElement('button'); saveFlowBtn.id='saveFlowBtn'; saveFlowBtn.className='secondary'; saveFlowBtn.textContent='Save Flow';
+  const loadFlowBtn = document.createElement('button'); loadFlowBtn.id='loadFlowBtn'; loadFlowBtn.className='secondary'; loadFlowBtn.textContent='Load Flow';
+  actionsEl?.appendChild(saveFlowBtn); actionsEl?.appendChild(loadFlowBtn); actionsEl?.appendChild(signBtn);
+
+  signBtn.addEventListener('click', ()=>{
+    const cur = getStoredToken();
+    const t = window.prompt('Enter API token (leave blank to sign out):', cur||'');
+    if(t!=null){ if(String(t).trim()){ setStoredToken(String(t).trim()); appendLog('[auth] token set'); } else { setStoredToken(null); appendLog('[auth] signed out'); } }
+  });
+
+  saveFlowBtn.addEventListener('click', async ()=>{
+    const name = window.prompt('Flow name (A-Za-z0-9_- up to 64 chars):', 'flow1'); if(!name) return;
+    try{
+      const body = { version:1, nodes: state.nodes, edges: state.edges, nextId: state.nextId, groups: state.groups, view: state.view, activePkg: state.activePkg };
+      const res = await apiFetch(`/api/flows/${encodeURIComponent(name)}.json`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const js = await res.json().catch(()=>({}));
+      if(js && js.ok){ appendLog(`[flow] saved ${name}`); }
+      else { appendLog('[flow] save error ' + JSON.stringify(js)); }
+    }catch(e){ appendLog('[flow] save failed'); }
+  });
+
+  loadFlowBtn.addEventListener('click', async ()=>{
+    try{
+      const res = await apiFetch('/api/flows');
+      const js = await res.json().catch(()=>({items:[]}));
+      const names = (Array.isArray(js.items)? js.items: []).map(x=>x.name);
+      const pick = window.prompt('Enter flow name to load' + (names.length? ` (available: ${names.join(', ')})` : ''), names[0]||'');
+      if(!pick) return;
+      const res2 = await apiFetch(`/api/flows/${encodeURIComponent(pick)}.json`);
+      const data = await res2.json();
+      if(data && Array.isArray(data.nodes) && Array.isArray(data.edges)){
+        state.nodes = data.nodes; state.edges = data.edges; state.nextId = data.nextId||1; state.groups = Array.isArray(data.groups)? data.groups: []; state.view = data.view || state.view; state.activePkg = data.activePkg || state.activePkg; setSelection([]); render(); appendLog(`[flow] loaded ${pick}`); saveToLocal();
+      } else {
+        appendLog('[flow] invalid flow file');
+      }
+    }catch(e){ appendLog('[flow] load failed'); }
+  });
 
   // Buttons
   document.getElementById('sampleBtn').addEventListener('click', ()=>{
@@ -436,7 +508,7 @@ export async function boot(){
   document.getElementById('installBtn').addEventListener('click', async ()=>{
     statusEl.textContent='installing...';
     appendLog('Installing requirements...');
-    const res = await fetch('/bootstrap', { method:'POST' });
+    const res = await apiFetch('/bootstrap', { method:'POST' });
     const js = await res.json().catch(()=>({}));
     appendLog(js.output ? js.output : JSON.stringify(js));
     statusEl.textContent='idle';
@@ -447,7 +519,7 @@ export async function boot(){
     appendLog('[kernel] restarting...');
     statusEl.textContent='restarting...';
     try{
-      const res = await fetch('/restart', { method:'POST' });
+      const res = await apiFetch('/restart', { method:'POST' });
       const js = await res.json().catch(()=>({}));
       appendLog('[kernel] restarted ' + JSON.stringify(js));
     }catch(e){
@@ -458,10 +530,19 @@ export async function boot(){
     ensureWS();
   });
 
-  // Initial kernel availability check
+  // Initial kernel availability check + auth
   try{
-    const res = await fetch('/health');
+    const res = await apiFetch('/health');
     const js = await res.json();
+    if(js && js.auth === 'required'){
+      authRequired = true;
+      const tok = getStoredToken();
+      if(tok){ authToken = tok; }
+      else {
+        const t = window.prompt('API token required. Enter token:');
+        if(t && String(t).trim()){ setStoredToken(String(t).trim()); }
+      }
+    }
     if(js && js.kernel === 'disabled'){
       kernelDisabled = true;
       statusEl.textContent = 'kernel disabled';
@@ -472,7 +553,7 @@ export async function boot(){
   // always reset kernel variables on page load
   if(!kernelDisabled){
     try{
-      await fetch('/restart', { method:'POST' });
+      await apiFetch('/restart', { method:'POST' });
       appendLog('[kernel] restarted on load');
     }catch{}
   }

@@ -5,25 +5,30 @@ This is a minimal local-first prototype:
 - Frontend: static HTML/JS
 - Flow: single-page UI that sends Python code to the kernel and streams iopub messages
 
-Quickstart (Windows PowerShell):
+Quickstart (Windows):
+
+Option A — zero-setup script (uses local Python):
 1) Install Python 3.10+ and ensure `python` is on PATH
-2) Create and activate a virtual environment (optional but recommended)
-3) Install backend requirements
-4) Run the backend:
+2) (Optional) Create a venv: `python -m venv .venv`
+3) Install deps: `python -m pip install -r backend/requirements.txt`
+4) Start server: `run-backend.cmd` (or double click)
 
-	```powershell
-	# (optional) create venv
-	python -m venv .venv
-	.\.venv\Scripts\Activate.ps1
+Option B — Docker (no local Python needed):
+1) Install Docker Desktop
+2) Build and run:
 
-	# install deps
-	python -m pip install -r backend/requirements.txt
+```
+docker build -t pythonflows:dev .
+docker run --rm -p 8000:8000 -e PYFLOWS_ENABLE_KERNEL=1 -v %cd%/data:/data/flows pythonflows:dev
+```
 
-	# start server
-	.\.venv\Scripts\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
-	```
+Option C — Docker Compose (persist flows automatically):
 
-5) Open http://localhost:8000 in your browser
+```
+docker compose up --build
+```
+
+Then open http://localhost:8000 in your browser.
 ![alt text](Demo.mp4)
 Notes:
 License:
@@ -78,6 +83,15 @@ Notes and tips:
 - CORS: Not required for the gateway itself, since the backend connects server-to-server. CORS for the frontend is already enabled on this FastAPI app.
 - Dependencies: `jupyter_client>=8` is included and supports the gateway client. No extra package is needed for the client-side integration.
 - Fallback: If the gateway module isn't available at runtime or the URL is not set, the app automatically falls back to a local kernel.
+
+## Cloud deployment (overview)
+
+Container-ready: A production-friendly `Dockerfile` is included.
+
+- Render.com or Railway: deploy directly from this repo using Docker; see `deploy/render.yaml` for an example.
+- Azure Container Apps / AKS: build the image, push to ACR, and deploy. Set env `PORT` if your platform requires it; the app honors `$PORT` automatically.
+- Persisting flows: mount a volume to `/data/flows` or set `PYFLOWS_DATA_DIR` to a writable path.
+- Security: set `PYFLOWS_API_TOKEN` to protect endpoints; keep the service private or behind auth.
 
 ## Quick Guide (New Features)
 

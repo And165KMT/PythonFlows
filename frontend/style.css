@@ -15,8 +15,8 @@ header h1 { margin: 0; font-size: 18px; }
 #rightResizer:hover { background: rgba(255,255,255,0.05); }
 #toolbar button { width: 100%; margin-bottom: 8px; padding: 8px; background:#111824; color:var(--text); border:1px solid #263041; border-radius:6px; cursor:pointer; text-align:left; }
 #toolbar button:hover { background:#152032; }
-#actions { display:flex; gap:8px; margin-top:12px; }
-#actions button { flex:1; padding:8px; background:var(--accent); color:white; border:0; border-radius:6px; cursor:pointer; }
+#actions { display:flex; gap:8px; margin-top:12px; flex-wrap: wrap; }
+#actions button { flex:1 1 48%; padding:8px; background:var(--accent); color:white; border:0; border-radius:6px; cursor:pointer; }
 #actions button.secondary { background:#263041; }
 #actions button.warn { background: var(--warn); color:#111; }
 
