@@ -1,5 +1,7 @@
 // Pandas package for FlowPython
 
+import { PH } from './shared.js';
+
 export function register(reg){
   // ReadCSV
   reg.node({
@@ -17,7 +19,7 @@ export function register(reg){
           <option value="folder" ${v.mode==='folder'?'selected':''}>folder (all CSV)</option>
         </select>
         <label>${v.mode==='inline'?'CSV': (v.mode==='path'?'Path':'Folder')}</label>
-        ${v.mode==='inline' ? `<textarea name="inline">${v.inline}</textarea>` : (v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.csv" style="flex:1"><button class="choose-folder" title="choose folder">Folder...</button></div>` : `<div style="display:flex; gap:6px"><input name="dir" value="${v.dir}" placeholder="C:\\data\\folder" style="flex:1"><button class="choose-folder" title="choose folder">Folder...</button></div>`)}
+    ${v.mode==='inline' ? `<textarea name="inline">${v.inline}</textarea>` : (v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.csv" style="flex:1"><button class="choose-file" title="choose file">File...</button></div>` : `<div style="display:flex; gap:6px"><input name="dir" value="${v.dir}" placeholder="C:\\data\\folder" style="flex:1"><button class="choose-folder" title="choose folder">Folder...</button></div>`) }
         <div class="folder-info" style="font-size:12px; color:#9ba3af; margin-top:4px"></div>
       `;
     },
@@ -37,6 +39,270 @@ export function register(reg){
       }
       seg.push(`print(${v}.head().to_string())`);
       return seg;
+    }
+  });
+
+  // XYPlot (line/scatter/area/hexbin)
+  reg.node({
+    id: 'pandas.XYPlot', title: 'XYPlot',
+    inputType: 'DataFrame',
+    outputType: 'Figure',
+    defaultParams: {
+      kind:'scatter', x:'', y:'',
+      color:'#1f77b4', linewidth:'2', marker:'', alpha:'1.0',
+      colorBy:'', cmap:'', s:'',
+      legend:true, grid:false, rot:'0',
+      title:'', xlabel:'', ylabel:'',
+      figsizeW:'6', figsizeH:'4', dpi:'100',
+      xlimMin:'', xlimMax:'', ylimMin:'', ylimMax:'',
+      stacked:false
+    },
+    form(node, ui){
+      const v=node.params||(node.params={});
+  const cols = ui.getUpstreamColumns(node);
+  const optsX = PH.colOptions(cols, v.x, true, '(none)');
+  const optsY = PH.colOptions(cols, v.y, true, '(none)');
+  const optsC = PH.colOptions(cols, v.colorBy, true, '');
+      return `
+        <label>kind</label>
+        <select name="kind">
+          <option ${v.kind==='scatter'?'selected':''}>scatter</option>
+          <option ${v.kind==='line'?'selected':''}>line</option>
+          <option ${v.kind==='area'?'selected':''}>area</option>
+          <option ${v.kind==='hexbin'?'selected':''}>hexbin</option>
+        </select>
+        <label>x</label><select name="x">${optsX}</select>
+        <label>y</label><select name="y">${optsY}</select>
+
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Color & Style</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>color</label><input name="color" value="${v.color||''}" placeholder="#1f77b4"></div>
+            <div><label>linewidth</label><input name="linewidth" type="number" step="0.1" value="${v.linewidth||''}"></div>
+            <div><label>marker</label><select name="marker">${['','o','s','^','v','D','x','+','*','.'].map(m=>`<option value="${m}" ${v.marker===m?'selected':''}>${m||'(none)'}</option>`).join('')}</select></div>
+            <div><label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}"></div>
+            <div><label>color by (scatter only)</label><select name="colorBy">${optsC}</select></div>
+            <div><label>cmap</label><input name="cmap" value="${v.cmap||''}" placeholder="tab10"></div>
+            <div><label>size (scatter)</label><input name="s" type="number" step="1" value="${v.s||''}" placeholder="20"></div>
+          </div>
+        </details>
+
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Advanced</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>legend</label><select name="legend"><option value="true" ${v.legend? 'selected':''}>true</option><option value="false" ${!v.legend? 'selected':''}>false</option></select></div>
+            <div><label>grid</label><select name="grid"><option value="true" ${v.grid? 'selected':''}>true</option><option value="false" ${!v.grid? 'selected':''}>false</option></select></div>
+            <div><label>rot</label><input name="rot" type="number" step="1" value="${v.rot||'0'}"></div>
+            <div><label>stacked (area)</label><select name="stacked"><option value="true" ${v.stacked? 'selected':''}>true</option><option value="false" ${!v.stacked? 'selected':''}>false</option></select></div>
+            <div><label>figsize W</label><input name="figsizeW" type="number" step="0.5" value="${v.figsizeW||'6'}"></div>
+            <div><label>figsize H</label><input name="figsizeH" type="number" step="0.5" value="${v.figsizeH||'4'}"></div>
+            <div><label>dpi</label><input name="dpi" type="number" step="1" value="${v.dpi||'100'}"></div>
+          </div>
+          <label style="margin-top:6px">title</label><input name="title" value="${v.title||''}">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>xlabel</label><input name="xlabel" value="${v.xlabel||''}"></div>
+            <div><label>ylabel</label><input name="ylabel" value="${v.ylabel||''}"></div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>xlim min</label><input name="xlimMin" value="${v.xlimMin||''}"></div>
+            <div><label>xlim max</label><input name="xlimMax" value="${v.xlimMax||''}"></div>
+            <div><label>ylim min</label><input name="ylimMin" value="${v.ylimMin||''}"></div>
+            <div><label>ylim max</label><input name="ylimMax" value="${v.ylimMax||''}"></div>
+          </div>
+        </details>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node);
+      const v=node.params||{};
+      const kind=v.kind||'scatter';
+      const x=v.x||''; const y=v.y||'';
+      const color=v.color||''; const linewidth=v.linewidth||''; const marker=v.marker||''; const alpha=v.alpha||'';
+      const colorBy=v.colorBy||''; const cmap=v.cmap||''; const s=v.s||'';
+      const legend=String(v.legend)!=='false'; const grid=String(v.grid)==='true'; const rot=v.rot||'';
+      const stacked=String(v.stacked)==='true';
+      const figsizeW=parseFloat(v.figsizeW||'6')||6; const figsizeH=parseFloat(v.figsizeH||'4')||4; const dpi=parseInt(v.dpi||'100')||100;
+      const title=(v.title||'').replace(/`/g,''); const xlabel=(v.xlabel||'').replace(/`/g,''); const ylabel=(v.ylabel||'').replace(/`/g,'');
+      const xlimMin=v.xlimMin||''; const xlimMax=v.xlimMax||''; const ylimMin=v.ylimMin||''; const ylimMax=v.ylimMax||'';
+      ctx.setLastPlotNode(node.id);
+      const lines=[];
+  lines.push(...PH.fig(v));
+  lines.push(...PH.dfResolve(src, { x, y, c: colorBy }));
+      lines.push(`_kwargs = dict(kind='${kind}', ax=ax, legend=${legend? 'True':'False'})`);
+      lines.push(`\nif _x is not None: _kwargs['x'] = _x\nif _y is not None: _kwargs['y'] = _y\n`);
+      if(color) lines.push(`_kwargs['color'] = r'''${color}'''`);
+      if(linewidth) lines.push(`_kwargs['linewidth'] = ${parseFloat(linewidth)}`);
+      if(marker) lines.push(`_kwargs['marker'] = r'''${marker}'''`);
+      if(alpha) lines.push(`_kwargs['alpha'] = ${parseFloat(alpha)}`);
+      if(rot) lines.push(`_kwargs['rot'] = ${parseInt(rot)}`);
+      if(kind==='area' && stacked) lines.push(`_kwargs['stacked'] = True`);
+      if(kind==='hexbin') lines.push(`_kwargs['gridsize'] = 25`);
+      // scatter colorBy handling via helper (only when kind is scatter)
+      if(kind==='scatter'){
+        lines.push(PH.scatterColorMap(cmap));
+      }
+      if(s) lines.push(`if '${kind}'=='scatter': _kwargs['s'] = ${parseFloat(s)}`);
+      lines.push(`\ntry:\n  _df.plot(**_kwargs)\nexcept Exception as _e:\n  print('PLOT_ERROR:', _e)\n`);
+  lines.push(...PH.axesAndShow({title, xlabel, ylabel, grid, xlimMin, xlimMax, ylimMin, ylimMax}));
+      return lines;
+    }
+  });
+
+  // BarPlot (categorical x vs numeric y)
+  reg.node({
+    id: 'pandas.BarPlot', title: 'BarPlot',
+    inputType: 'DataFrame',
+    outputType: 'Figure',
+    defaultParams: {
+      x:'', y:'',
+      color:'#1f77b4', alpha:'1.0', linewidth:'', rot:'0', stacked:false,
+      legend:true, grid:false,
+      title:'', xlabel:'', ylabel:'',
+      figsizeW:'6', figsizeH:'4', dpi:'100'
+    },
+    form(node, ui){
+      const v=node.params||(node.params={});
+  const cols = ui.getUpstreamColumns(node);
+  const optsX = PH.colOptions(cols, v.x, true, '(none)');
+  const optsY = PH.colOptions(cols, v.y, true, '(none)');
+      return `
+        <label>x (category)</label><select name="x">${optsX}</select>
+        <label>y (numeric)</label><select name="y">${optsY}</select>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Style</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>color</label><input name="color" value="${v.color||''}" placeholder="#1f77b4"></div>
+            <div><label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}"></div>
+            <div><label>linewidth</label><input name="linewidth" type="number" step="0.1" value="${v.linewidth||''}"></div>
+            <div><label>rot</label><input name="rot" type="number" step="1" value="${v.rot||'0'}"></div>
+            <div><label>stacked</label><select name="stacked"><option value="true" ${v.stacked? 'selected':''}>true</option><option value="false" ${!v.stacked? 'selected':''}>false</option></select></div>
+            <div><label>legend</label><select name="legend"><option value="true" ${v.legend? 'selected':''}>true</option><option value="false" ${!v.legend? 'selected':''}>false</option></select></div>
+            <div><label>grid</label><select name="grid"><option value="true" ${v.grid? 'selected':''}>true</option><option value="false" ${!v.grid? 'selected':''}>false</option></select></div>
+          </div>
+        </details>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Figure</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>figsize W</label><input name="figsizeW" type="number" step="0.5" value="${v.figsizeW||'6'}"></div>
+            <div><label>figsize H</label><input name="figsizeH" type="number" step="0.5" value="${v.figsizeH||'4'}"></div>
+            <div><label>dpi</label><input name="dpi" type="number" step="1" value="${v.dpi||'100'}"></div>
+          </div>
+          <label style="margin-top:6px">title</label><input name="title" value="${v.title||''}">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>xlabel</label><input name="xlabel" value="${v.xlabel||''}"></div>
+            <div><label>ylabel</label><input name="ylabel" value="${v.ylabel||''}"></div>
+          </div>
+        </details>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v=node.params||{};
+      const x=v.x||''; const y=v.y||'';
+      const color=v.color||''; const alpha=v.alpha||''; const linewidth=v.linewidth||''; const rot=v.rot||'';
+      const stacked=String(v.stacked)==='true'; const legend=String(v.legend)!=='false'; const grid=String(v.grid)==='true';
+      const figsizeW=parseFloat(v.figsizeW||'6')||6; const figsizeH=parseFloat(v.figsizeH||'4')||4; const dpi=parseInt(v.dpi||'100')||100;
+      const title=(v.title||'').replace(/`/g,''); const xlabel=(v.xlabel||'').replace(/`/g,''); const ylabel=(v.ylabel||'').replace(/`/g,'');
+      ctx.setLastPlotNode(node.id);
+      const lines=[];
+  lines.push(...PH.fig(v));
+  lines.push(...PH.dfResolve(src, { x, y }));
+      lines.push(`_kwargs = dict(kind='bar', ax=ax, legend=${legend? 'True':'False'})`);
+      lines.push(`\nif _x is not None: _kwargs['x'] = _x\nif _y is not None: _kwargs['y'] = _y\n`);
+      if(color) lines.push(`_kwargs['color'] = r'''${color}'''`);
+      if(alpha) lines.push(`_kwargs['alpha'] = ${parseFloat(alpha)}`);
+      if(linewidth) lines.push(`_kwargs['linewidth'] = ${parseFloat(linewidth)}`);
+      if(rot) lines.push(`_kwargs['rot'] = ${parseInt(rot)}`);
+      if(stacked) lines.push(`_kwargs['stacked'] = True`);
+      lines.push(`\nif _x is None or _y is None:\n  print('PLOT_WARN: x or y not set / not found');\nelse:\n  try:\n    _df.plot(**_kwargs)\n  except Exception as _e:\n    print('PLOT_ERROR:', _e)\n`);
+  lines.push(...PH.axesAndShow({title, xlabel, ylabel, grid}));
+      return lines;
+    }
+  });
+
+  // DistributionPlot (hist/kde/box)
+  reg.node({
+    id: 'pandas.DistributionPlot', title: 'DistributionPlot',
+    inputType: 'DataFrame',
+    outputType: 'Figure',
+    defaultParams: {
+      kind:'hist', column:'', bins:'10', stacked:false,
+      color:'#1f77b4', alpha:'1.0',
+      legend:true, grid:false,
+      title:'', xlabel:'', ylabel:'',
+      figsizeW:'6', figsizeH:'4', dpi:'100'
+    },
+    form(node, ui){
+      const v=node.params||(node.params={});
+  const cols = ui.getUpstreamColumns(node);
+  const optsCol = PH.colOptions(cols, v.column, true, '(auto numeric)');
+      return `
+        <label>kind</label>
+        <select name="kind">
+          <option ${v.kind==='hist'?'selected':''}>hist</option>
+          <option ${v.kind==='kde'?'selected':''}>kde</option>
+          <option ${v.kind==='box'?'selected':''}>box</option>
+        </select>
+        <label>column</label><select name="column">${optsCol}</select>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Style</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>color</label><input name="color" value="${v.color||''}" placeholder="#1f77b4"></div>
+            <div><label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}"></div>
+            <div><label>bins (hist)</label><input name="bins" type="number" step="1" value="${v.bins||'10'}"></div>
+            <div><label>stacked (hist)</label><select name="stacked"><option value="true" ${v.stacked? 'selected':''}>true</option><option value="false" ${!v.stacked? 'selected':''}>false</option></select></div>
+            <div><label>legend</label><select name="legend"><option value="true" ${v.legend? 'selected':''}>true</option><option value="false" ${!v.legend? 'selected':''}>false</option></select></div>
+            <div><label>grid</label><select name="grid"><option value="true" ${v.grid? 'selected':''}>true</option><option value="false" ${!v.grid? 'selected':''}>false</option></select></div>
+          </div>
+        </details>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer; user-select:none">Figure</summary>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>figsize W</label><input name="figsizeW" type="number" step="0.5" value="${v.figsizeW||'6'}"></div>
+            <div><label>figsize H</label><input name="figsizeH" type="number" step="0.5" value="${v.figsizeH||'4'}"></div>
+            <div><label>dpi</label><input name="dpi" type="number" step="1" value="${v.dpi||'100'}"></div>
+          </div>
+          <label style="margin-top:6px">title</label><input name="title" value="${v.title||''}">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px">
+            <div><label>xlabel</label><input name="xlabel" value="${v.xlabel||''}"></div>
+            <div><label>ylabel</label><input name="ylabel" value="${v.ylabel||''}"></div>
+          </div>
+        </details>
+      `;
+    },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v=node.params||{};
+      const kind=v.kind||'hist'; const column=v.column||''; const bins=v.bins||''; const stacked=String(v.stacked)==='true';
+      const color=v.color||''; const alpha=v.alpha||'';
+      const legend=String(v.legend)!=='false'; const grid=String(v.grid)==='true';
+      const figsizeW=parseFloat(v.figsizeW||'6')||6; const figsizeH=parseFloat(v.figsizeH||'4')||4; const dpi=parseInt(v.dpi||'100')||100;
+      const title=(v.title||'').replace(/`/g,''); const xlabel=(v.xlabel||'').replace(/`/g,''); const ylabel=(v.ylabel||'').replace(/`/g,'');
+      ctx.setLastPlotNode(node.id);
+      const lines=[];
+  lines.push(...PH.fig(v));
+  lines.push(...PH.dfResolve(src));
+      lines.push(`_col_pref = r'''${column}'''`);
+      lines.push(`_col = _col_pref if _col_pref in _cols and _col_pref else None`);
+      lines.push(`\nif _col is None and '${kind}'=='hist':\n  _numcols = _df.select_dtypes(include='number').columns.tolist()\n  _col = _numcols[0] if _numcols else None\n`);
+      lines.push(`_kwargs = dict(kind='${kind}', ax=ax, legend=${legend? 'True':'False'})`);
+      if(color) lines.push(`_kwargs['color'] = r'''${color}'''`);
+      if(alpha) lines.push(`_kwargs['alpha'] = ${parseFloat(alpha)}`);
+      if(bins) lines.push(`if '${kind}'=='hist': _kwargs['bins'] = ${parseInt(bins)}`);
+      if(stacked) lines.push(`if '${kind}'=='hist': _kwargs['stacked'] = True`);
+      lines.push(`\ntry:`);
+      lines.push(`  if '${kind}'=='hist':`);
+      lines.push(`    if _col is None:`);
+      lines.push(`      print('PLOT_WARN: No numeric column available for histogram')`);
+      lines.push(`    else:`);
+      lines.push(`      _df.plot(column=_col, **_kwargs)`);
+      lines.push(`  elif '${kind}' in ['kde','box']:`);
+      lines.push(`    if _col is not None:`);
+      lines.push(`      _df[_col].plot(**_kwargs)`);
+      lines.push(`    else:`);
+      lines.push(`      _df.select_dtypes(include='number').plot(**_kwargs)`);
+      lines.push(`except Exception as _e:`);
+      lines.push(`  print('PLOT_ERROR:', _e)`);
+  lines.push(...PH.axesAndShow({title, xlabel, ylabel, grid}));
+      return lines;
     }
   });
 
@@ -82,13 +348,14 @@ export function register(reg){
     code(node, ctx){ const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); const by=node.params.by||'city'; const val=node.params.value||'temp'; const func=node.params.func||'mean'; return [`${v} = ${src}.groupby('${by}')['${val}'].agg('${func}').reset_index()`,`print(${v}.head().to_string())`]; }
   });
 
+  /*
   // Plot
   reg.node({
   id: 'pandas.Plot', title:'Plot',
   inputType: 'DataFrame',
   outputType: 'Figure',
     defaultParams: { 
-      kind:'bar', x:'city', y:'temp',
+    kind:'bar', x:'', y:'', column:'',
       color:'#1f77b4', linewidth:'2', marker:'', alpha:'1.0',
       colorBy:'', cmap:'', s:'',
       legend:true, grid:false, rot:'0',
@@ -100,9 +367,12 @@ export function register(reg){
     form(node, ui){
       const v=node.params||(node.params={});
       const cols = ui.getUpstreamColumns(node);
-      const optsX = cols.length? cols.map(c=>`<option ${v.x===c?'selected':''}>${c}</option>`).join('') : `<option>${v.x||''}</option>`;
-      const optsY = cols.length? cols.map(c=>`<option ${v.y===c?'selected':''}>${c}</option>`).join('') : `<option>${v.y||''}</option>`;
-      const optsC = [''].concat(cols).map(c=>`<option ${v.colorBy===c?'selected':''}>${c}</option>`).join('');
+    const optsX = [''].concat(cols).map(c=>`<option value="${c}" ${v.x===c?'selected':''}>${c||'(none)'}</option>`).join('');
+    const optsY = [''].concat(cols).map(c=>`<option value="${c}" ${v.y===c?'selected':''}>${c||'(none)'}</option>`).join('');
+    const optsCol = [''].concat(cols).map(c=>`<option value="${c}" ${v.column===c?'selected':''}>${c||'(auto numeric)'}</option>`).join('');
+    const optsC = [''].concat(cols).map(c=>`<option value="${c}" ${v.colorBy===c?'selected':''}>${c}</option>`).join('');
+    const showXY = ['line','scatter','bar','area','hexbin'].includes(v.kind||'bar');
+  const showColumn = ['hist'].includes(v.kind||'bar');
       return `
       <label>kind</label>
       <select name="kind">
@@ -115,8 +385,9 @@ export function register(reg){
         <option ${v.kind==='kde'?'selected':''}>kde</option>
         <option ${v.kind==='hexbin'?'selected':''}>hexbin</option>
       </select>
-      <label>x</label><select name="x">${optsX}</select>
-      <label>y</label><select name="y">${optsY}</select>
+    ${showXY ? `<label>x</label><select name="x">${optsX}</select>` : ''}
+    ${showXY ? `<label>y</label><select name="y">${optsY}</select>` : ''}
+    ${showColumn ? `<label>column</label><select name="column">${optsCol}</select>` : ''}
 
       <details style="margin-top:8px">
         <summary style="cursor:pointer; user-select:none">Color & Style</summary>
@@ -137,7 +408,7 @@ export function register(reg){
             <label>alpha</label><input name="alpha" type="number" min="0" max="1" step="0.05" value="${v.alpha||'1.0'}">
           </div>
           <div>
-            <label>color by (column)</label><select name="colorBy">${optsC}</select>
+      <label>color by (scatter only)</label><select name="colorBy">${optsC}</select>
           </div>
           <div>
             <label>cmap</label><input name="cmap" value="${v.cmap||''}" placeholder="tab10">
@@ -204,75 +475,128 @@ export function register(reg){
         </div>
       </details>
     `; },
-    code(node, ctx){ 
-      const src=ctx.srcVar(node);
-      const v = node.params||{};
-      const kind = v.kind||'bar';
-      const x = v.x||'city';
-      const y = v.y||'temp';
-      const color = v.color||'';
-      const linewidth = v.linewidth||'';
-      const marker = v.marker||'';
-      const alpha = v.alpha||'';
-  const colorBy = v.colorBy||'';
-  const cmap = (v.cmap||'');
-  const s = v.s||'';
-      const legend = String(v.legend) !== 'false';
-      const grid = String(v.grid) === 'true';
-      const rot = v.rot||'';
-      const bins = v.bins||'';
-      const stacked = String(v.stacked) === 'true';
-      const figsizeW = parseFloat(v.figsizeW||'6') || 6;
-      const figsizeH = parseFloat(v.figsizeH||'4') || 4;
-      const dpi = parseInt(v.dpi||'100');
-      const title = (v.title||'').replace(/`/g,'');
-      const xlabel = (v.xlabel||'').replace(/`/g,'');
-      const ylabel = (v.ylabel||'').replace(/`/g,'');
-      const xlimMin = v.xlimMin||''; const xlimMax=v.xlimMax||'';
-      const ylimMin = v.ylimMin||''; const ylimMax=v.ylimMax||'';
-      ctx.setLastPlotNode(node.id);
-      const lines = [];
-      lines.push(`fig = plt.figure(figsize=(${figsizeW}, ${figsizeH}), dpi=${dpi})`);
-      lines.push(`ax = plt.gca()`);
-      const args = [];
-      args.push(`kind='${kind}'`);
-      if(x) args.push(`x='${x}'`);
-      if(y) args.push(`y='${y}'`);
-      args.push(`ax=ax`);
-      if(color && !colorBy) args.push(`color='${color}'`);
-      if(linewidth) args.push(`linewidth=${parseFloat(linewidth)}`);
-      if(marker) args.push(`marker='${marker}'`);
-      if(alpha) args.push(`alpha=${parseFloat(alpha)}`);
-      if(rot) args.push(`rot=${parseInt(rot)}`);
-  if(kind==='hist' && bins) args.push(`bins=${parseInt(bins)}`);
-  if(kind==='hexbin') args.push(`gridsize=25`);
-      if((kind==='bar' || kind==='hist') && stacked) args.push(`stacked=True`);
-      if(legend!==undefined) args.push(`legend=${legend? 'True':'False'}`);
-      if(kind==='scatter' && colorBy){
-        const scatArgs = [
-          `x='${x}'`,`y='${y}'`,`ax=ax`
-        ];
-        if(s) scatArgs.push(`s=${parseFloat(s)}`);
-        if(alpha) scatArgs.push(`alpha=${parseFloat(alpha)}`);
-        if(cmap) scatArgs.push(`cmap='${cmap}'`);
-        scatArgs.push(`c=${src}['${colorBy}']`);
-        lines.push(`${src}.plot(kind='scatter', ${scatArgs.join(', ')})`);
-      } else {
-        if(colorBy){ args.push(`c=${src}['${colorBy}']`); if(cmap) args.push(`cmap='${cmap}'`); }
-        lines.push(`${src}.plot(${args.join(', ')})`);
-      }
-  if(title) lines.push(`ax.set_title(_fp_render(r'''${title}'''))`);
-  if(xlabel) lines.push(`ax.set_xlabel(_fp_render(r'''${xlabel}'''))`);
-  if(ylabel) lines.push(`ax.set_ylabel(_fp_render(r'''${ylabel}'''))`);
-      if(grid) lines.push(`ax.grid(True)`);
-      if(xlimMin!=='' && xlimMax!=='') lines.push(`ax.set_xlim(${parseFloat(xlimMin)}, ${parseFloat(xlimMax)})`);
-      if(ylimMin!=='' && ylimMax!=='') lines.push(`ax.set_ylim(${parseFloat(ylimMin)}, ${parseFloat(ylimMax)})`);
-      lines.push(`plt.tight_layout()`);
-      lines.push(`from IPython.display import display`);
-      lines.push(`display(plt.gcf())`);
-      return lines;
+  code(node, ctx){ 
+    const src=ctx.srcVar(node);
+    const v = node.params||{};
+    const kind = v.kind||'bar';
+    const x = v.x||'';
+    const y = v.y||'';
+    const column = v.column||'';
+    const color = v.color||'';
+    const linewidth = v.linewidth||'';
+    const marker = v.marker||'';
+    const alpha = v.alpha||'';
+    const colorBy = v.colorBy||'';
+    const cmap = (v.cmap||'');
+    const s = v.s||'';
+    const legend = String(v.legend) !== 'false';
+    const grid = String(v.grid) === 'true';
+    const rot = v.rot||'';
+    const bins = v.bins||'';
+    const stacked = String(v.stacked) === 'true';
+    const figsizeW = parseFloat(v.figsizeW||'6') || 6;
+    const figsizeH = parseFloat(v.figsizeH||'4') || 4;
+    const dpi = parseInt(v.dpi||'100');
+    const title = (v.title||'').replace(/`/g,'');
+    const xlabel = (v.xlabel||'').replace(/`/g,'');
+    const ylabel = (v.ylabel||'').replace(/`/g,'');
+    const xlimMin = v.xlimMin||''; const xlimMax=v.xlimMax||'';
+    const ylimMin = v.ylimMin||''; const ylimMax=v.ylimMax||'';
+    ctx.setLastPlotNode(node.id);
+    const lines = [];
+    lines.push(`fig = plt.figure(figsize=(${figsizeW}, ${figsizeH}), dpi=${dpi})`);
+    lines.push(`ax = plt.gca()`);
+    // Resolve column existence on the Python side to avoid KeyError
+    lines.push(`_df = ${src}`);
+    lines.push(`_cols = set(_df.columns.tolist())`);
+    lines.push(`_x = r'''${x}''' if r'''${x}''' in _cols and r'''${x}''' else None`);
+    lines.push(`_y = r'''${y}''' if r'''${y}''' in _cols and r'''${y}''' else None`);
+    lines.push(`_c = r'''${colorBy}''' if r'''${colorBy}''' in _cols and r'''${colorBy}''' else None`);
+    // Build per-kind kwargs with safeguards
+    if(kind==='scatter'){
+    lines.push(`_kwargs = dict(kind='scatter', ax=ax, legend=${legend? 'True':'False'})`);
+    lines.push(`
+if _x is not None: _kwargs['x'] = _x
+if _y is not None: _kwargs['y'] = _y
+`);
+    if(s) lines.push(`_kwargs['s'] = ${parseFloat(s)}`);
+    if(alpha) lines.push(`_kwargs['alpha'] = ${parseFloat(alpha)}`);
+    if(marker) lines.push(`_kwargs['marker'] = r'''${marker}'''`);
+    if(linewidth) lines.push(`_kwargs['linewidth'] = ${parseFloat(linewidth)}`);
+    lines.push(`
+if _c is not None:
+  _c_series = _df[_c]
+  try:
+    # convert non-numeric to categorical codes for coloring
+    _is_numeric = hasattr(_c_series, 'dtype') and getattr(_c_series.dtype, 'kind', 'O') not in ['O','U','S','b']
+    _c_vals = _c_series if _is_numeric else _c_series.astype('category').cat.codes
+  except Exception:
+    _c_vals = _c_series
+  _kwargs['c'] = _c_vals
+  ${cmap? `_kwargs['cmap'] = r'''${cmap}'''` : 'pass'}
+`);
+    lines.push(`
+try:
+  _df.plot(**_kwargs)
+except Exception as _e:
+  print('PLOT_ERROR:', _e)
+`);
+    } else if(kind==='hist'){
+    lines.push(`_col_pref = r'''${column}'''`);
+    lines.push(`_col = _col_pref if _col_pref in _cols and _col_pref else None`);
+    lines.push(`
+if _col is None:
+  _numcols = _df.select_dtypes(include='number').columns.tolist()
+  _col = _numcols[0] if _numcols else None
+`);
+    lines.push(`_kwargs = dict(kind='hist', ax=ax, legend=${legend? 'True':'False'})`);
+    if(bins) lines.push(`_kwargs['bins'] = ${parseInt(bins)}`);
+    if(color) lines.push(`_kwargs['color'] = r'''${color}'''`);
+    if(rot) lines.push(`_kwargs['rot'] = ${parseInt(rot)}`);
+    if(stacked) lines.push(`_kwargs['stacked'] = True`);
+    lines.push(`
+if _col is None:
+  print('PLOT_WARN: No numeric column available for histogram')
+else:
+  try:
+    _df.plot(column=_col, **_kwargs)
+  except Exception as _e:
+    print('PLOT_ERROR:', _e)
+`);
+    } else {
+    // line, bar, area, box, kde, hexbin
+    lines.push(`_kwargs = dict(kind='${kind}', ax=ax, legend=${legend? 'True':'False'})`);
+    lines.push(`
+if _x is not None: _kwargs['x'] = _x
+if _y is not None: _kwargs['y'] = _y
+`);
+    if(color) lines.push(`_kwargs['color'] = r'''${color}'''`);
+    if(linewidth) lines.push(`_kwargs['linewidth'] = ${parseFloat(linewidth)}`);
+    if(marker) lines.push(`_kwargs['marker'] = r'''${marker}'''`);
+    if(alpha) lines.push(`_kwargs['alpha'] = ${parseFloat(alpha)}`);
+    if(rot) lines.push(`_kwargs['rot'] = ${parseInt(rot)}`);
+    if((kind==='bar' || kind==='area') && stacked) lines.push(`_kwargs['stacked'] = True`);
+    if(kind==='hexbin') lines.push(`_kwargs['gridsize'] = 25`);
+    lines.push(`
+try:
+  _df.plot(**_kwargs)
+except Exception as _e:
+  print('PLOT_ERROR:', _e)
+`);
     }
+    if(title) lines.push(`ax.set_title(_fp_render(r'''${title}'''))`);
+    if(xlabel) lines.push(`ax.set_xlabel(_fp_render(r'''${xlabel}'''))`);
+    if(ylabel) lines.push(`ax.set_ylabel(_fp_render(r'''${ylabel}'''))`);
+    if(grid) lines.push(`ax.grid(True)`);
+    if(xlimMin!=='' && xlimMax!=='') lines.push(`ax.set_xlim(${parseFloat(xlimMin)}, ${parseFloat(xlimMax)})`);
+    if(ylimMin!=='' && ylimMax!=='') lines.push(`ax.set_ylim(${parseFloat(ylimMin)}, ${parseFloat(ylimMax)})`);
+    lines.push(`plt.tight_layout()`);
+    lines.push(`from IPython.display import display`);
+    lines.push(`display(plt.gcf())`);
+    return lines;
+  }
   });
+  */
 
   // CorrHeatmap
   reg.node({
