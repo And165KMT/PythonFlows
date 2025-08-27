@@ -5,16 +5,24 @@ This is a minimal local-first prototype:
 - Frontend: static HTML/JS
 - Flow: single-page UI that sends Python code to the kernel and streams iopub messages
 
-Requirements (Windows, cmd.exe):
+Quickstart (Windows PowerShell):
 1) Install Python 3.10+ and ensure `python` is on PATH
 2) Create and activate a virtual environment (optional but recommended)
 3) Install backend requirements
 4) Run the backend:
-	Open a command prompt and run:
-   
-	```cmd
-	.venv\Scripts\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+
+	```powershell
+	# (optional) create venv
+	python -m venv .venv
+	.\.venv\Scripts\Activate.ps1
+
+	# install deps
+	python -m pip install -r backend/requirements.txt
+
+	# start server
+	.\.venv\Scripts\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 	```
+
 5) Open http://localhost:8000 in your browser
 ![alt text](image.png)
 Notes:
@@ -34,6 +42,21 @@ The Jupyter kernel capability can be disabled for non-paid editions.
 	- `$env:PYFLOWS_LICENSE_ALLOW = "1"`  # dev/test only, accepts any key
 
 When disabled, `/run`, `/api/variables`, `/restart`, and `/ws` return 403 or an empty payload. `/health` returns `{ kernel: "disabled" }`.
+
+## Security note (important)
+
+- This app executes arbitrary Python code via a Jupyter kernel. Use on your local machine and do not expose to the internet.
+- If you need to access from other devices, put it behind proper authentication and network controls. Prefer `--host 127.0.0.1`.
+- Consider restricting CORS to your origin only (future versions will support env-based origin control).
+
+## API endpoints (overview)
+
+- GET `/`                    ... serve frontend
+- GET `/health`              ... kernel status (ok/down/disabled)
+- POST `/run`                ... execute generated code on the kernel (body: `{ code: string }`)
+- POST `/restart`            ... restart the kernel
+- GET `/api/variables`       ... list kernel global variables (best-effort)
+- WS  `/ws`                  ... iopub message stream (display_data/execute_result/stream/error/status)
 
 ## Use a remote kernel via Azure (Jupyter Enterprise Gateway)
 

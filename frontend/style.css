@@ -41,6 +41,7 @@ header h1 { margin: 0; font-size: 18px; }
 .node .actions .btn-icon.danger:hover { background:#2a1216; color:#fff; border-color: var(--err); }
 /* Drag-and-drop highlight for inputs */
 .node input.dnd-hover, .node textarea.dnd-hover { outline: 2px dashed #1f6feb; outline-offset: 2px; }
+.node.selected { border:2px solid #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.65), 0 6px 16px rgba(59,130,246,0.25); }
 .port { width:12px; height:12px; border-radius:50%; background: #44546a; border:1px solid #2a3445; cursor: crosshair; box-shadow: 0 0 0 4px rgba(0,0,0,0); transition: box-shadow .1s; }
 .port.selected { box-shadow: 0 0 0 4px rgba(31,111,235,0.35); }
 .ports { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; }
@@ -60,6 +61,9 @@ header h1 { margin: 0; font-size: 18px; }
 /* Right panel */
 #log { white-space: pre-wrap; background: #0b0f14; color: #a7f3d0; padding: 8px; height: 280px; overflow: auto; border-top:1px solid #1f2329; }
 #genCode { background:#0b0f14; color:#c9d1d9; border:0; border-top:1px solid #1f2329; padding:10px; font-family: ui-monospace, Consolas, monospace; height:100%; overflow:auto; }
+
+/* Group frame collapsed state */
+.group-frame.collapsed{ background: rgba(31,111,235,0.03); border:2px dotted #385a9a; }
 
 /* Right panel tabs */
 .tabs { display:inline-flex; background:#111824; border:1px solid #263041; border-radius:8px; overflow:hidden; }

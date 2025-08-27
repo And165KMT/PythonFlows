@@ -37,6 +37,10 @@ export function computeUpstreamColumns(n){
     if(!cur || seen.has(cur.id)) return [];
     seen.add(cur.id);
     const up = upstreamOf(cur);
+    // sklearn synthetic data: known columns
+    if(cur.type==='sklearn.MakeBlobs'){
+      return ['x1','x2','label'];
+    }
     if(cur.type==='pandas.ReadCSV'){
       if(cur.params?.mode==='inline' && cur.params?.inline){
         const first = String(cur.params.inline).split(/\r?\n/)[0]||'';
@@ -94,6 +98,9 @@ export function computeUpstreamColumns(n){
     }
     if(cur.type==='sklearn.TrainTestSplit'){
       const cols = walk(up); return uniq([...cols, 'split']);
+    }
+    if(cur.type==='sklearn.KMeans'){
+      const cols = walk(up); return uniq([...cols, 'cluster']);
     }
     if(cur.type==='sklearn.StandardScaler'){
       const cols = walk(up);
@@ -160,7 +167,13 @@ export function restoreFromLocal(){
       state.view = obj.view || { scale:1, tx:0, ty:0 };
       state.activePkg = obj.activePkg || state.activePkg;
       state.lastPlotNodeId = obj.lastPlotNodeId || null;
-      state.groups = Array.isArray(obj.groups) ? obj.groups : [];
+      state.groups = Array.isArray(obj.groups) ? obj.groups.map(g=> ({
+        id: g.id,
+        name: g.name || 'Subsystem',
+        nodeIds: Array.isArray(g.nodeIds) ? g.nodeIds : [],
+        collapsed: !!g.collapsed,
+        frame: (g.frame && typeof g.frame==='object') ? g.frame : null
+      })) : [];
       state.selection = new Set();
       return true;
     }
@@ -200,7 +213,7 @@ export function deleteNodes(ids){
 export function createGroup(name, ids){
   const id = 'g' + Math.random().toString(36).slice(2,8);
   const nodeIds = Array.from(new Set(ids||[]));
-  state.groups.push({ id, name: name||('Subsystem '+(state.groups.length+1)), nodeIds });
+  state.groups.push({ id, name: name||('Subsystem '+(state.groups.length+1)), nodeIds, collapsed: false, frame: null });
   return id;
 }
 export function deleteGroup(id){ state.groups = state.groups.filter(g=> g.id!==id); }

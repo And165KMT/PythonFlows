@@ -118,6 +118,16 @@ function screenToWorldPoint(clientX, clientY){ const rect = canvasWrap.getBoundi
 function applyViewTransform(){ const s=getScale(), tx=getTx(), ty=getTy(); nodesEl.style.transformOrigin='0 0'; nodesEl.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`; }
 function updatePreviewDock(){}
 
+// 選択ハイライトをDOMへ反映
+function refreshSelectionHighlight(){
+  const S = new Set(state.selection||[]);
+  document.querySelectorAll('.node').forEach(el=>{
+    const id = el.getAttribute('data-node-id');
+    if(!id) return;
+    if(S.has(id)) el.classList.add('selected'); else el.classList.remove('selected');
+  });
+}
+
 // 追加: クリップボード（キャンバス貼り付け用に window にも同期）
 let clipboardGraph = null;
 
@@ -228,6 +238,7 @@ function createNodeEl(node){
   el.style.left = (node.x||80) + 'px';
   el.style.top = (node.y||80) + 'px';
   el.style.width = Math.max(160, node.w || 220) + 'px';
+  if(isSelected(node.id)) el.classList.add('selected');
   const pmode = getPreviewMode();
   const wantPreview = (pmode==='all') || (pmode==='plots' && isFigureNode(node));
   const title = def?.title || node.type.split('.').slice(-1)[0];
@@ -250,8 +261,74 @@ function createNodeEl(node){
   </div>
   <div class=\"node-resize-h\" title=\"Drag to resize width\"></div>`;
   el.querySelector('.node-del').addEventListener('click', ()=>{ deleteNodeById(node.id); render(); saveToLocal(); });
+    // Run this node (exec upstream + this)
+    const runBtn = el.querySelector('.node-run');
+    if(runBtn){
+      runBtn.addEventListener('click', async ()=>{
+        await runWithBusy(async()=>{
+          ensureWS(); statusEl.textContent='running...';
+          const code = genCodeUpTo(node.id); genCodeEl.textContent = code;
+          const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+          let js={}; try{ js=await res.json(); }catch{}
+          appendLog('Sent exec (node '+node.id+'): ' + JSON.stringify(js));
+        }, runBtn, 'Running...');
+      });
+    }
   // 追加: ノード右クリックメニュー
   el.addEventListener('contextmenu', (e)=>{ e.preventDefault(); e.stopPropagation(); openNodeContextMenu(node.id, e.clientX, e.clientY); });
+  // 左クリック: 単一選択（フォーム/ポート/リサイズは除外）
+  el.addEventListener('mousedown', (e)=>{
+    if(e.button!==0) return;
+    if(e.target.closest('input, textarea, select, button, a, .port, .node-resize-h, .node-resize-v')) return;
+    if(e.shiftKey){
+      if(isSelected(node.id)) removeFromSelection(node.id); else addToSelection(node.id);
+    } else {
+      setSelection([node.id]);
+    }
+    refreshSelectionHighlight();
+    saveToLocal();
+  });
+  // ポート: 左クリック接続（Out -> In）とサジェスト表示
+  const outPort = el.querySelector('.port.out');
+  const inPort = el.querySelector('.port.in');
+  function clearPendingConnectionUI(){
+    state.pendingSrc = null;
+    try{ clearGhost(); }catch{}
+    try{ closeQuickAdd(); }catch{}
+    document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+  }
+  if(outPort){
+    outPort.addEventListener('mousedown', (e)=>{
+      if(e.button!==0) return;
+      e.preventDefault(); e.stopPropagation();
+      // トグル
+      if(state.pendingSrc===node.id){ clearPendingConnectionUI(); return; }
+      document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+      state.pendingSrc = node.id;
+      outPort.classList.add('selected');
+      // サジェスト(Quick Add)をポート付近に表示
+      const r = outPort.getBoundingClientRect();
+      const x = Math.round(r.right + 10);
+      const y = Math.round(r.top + r.height/2);
+      try{ openQuickAdd(x, y, node.id); }catch{}
+    });
+  }
+  if(inPort){
+    const finish = (e)=>{
+      if(e.button!==0) return;
+      if(!state.pendingSrc) return;
+      e.preventDefault(); e.stopPropagation();
+      const from = state.pendingSrc; const to = node.id;
+      if(from && from!==to){
+        const exists = state.edges.some(ed=> ed.from===from && ed.to===to);
+        if(!exists){ state.edges.push({ from, to }); drawEdges(); saveToLocal(); }
+      }
+      clearPendingConnectionUI();
+      render();
+    };
+    inPort.addEventListener('mouseup', finish);
+    inPort.addEventListener('click', finish);
+  }
   // ...existing code...
   return el; }
 
@@ -284,31 +361,50 @@ function renderSubsystems(){
 function ensureGroupsLayer(){ if(!groupsLayer){ groupsLayer = document.createElement('div'); groupsLayer.id='groupsLayer'; groupsLayer.style.position='absolute'; groupsLayer.style.inset='0'; nodesEl.appendChild(groupsLayer); } groupsLayer.innerHTML=''; }
 function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) return; const scale=getScale();
   state.groups.forEach(g=>{
-    const nodesArr = (g.nodeIds||[]).map(id=> state.nodes.find(n=> n.id===id)).filter(Boolean);
-    if(!nodesArr.length) return;
-    // DOMサイズから厳密に枠を算出（はみ出し抑止）
-    const nodeEls = (g.nodeIds||[]).map(id=> document.querySelector(`[data-node-id="${id}"]`)).filter(Boolean);
+    // 存在しないノードIDを除去（枠は残す）
+    g.nodeIds = (g.nodeIds||[]).filter(id=> !!getNode(id));
+    // バウンディングボックス計算（折りたたみ時は最後のframeを利用）
     let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-    nodeEls.forEach(el=>{ const id=el.dataset.nodeId; const n=getNode(id); const r=el.getBoundingClientRect(); const w=r.width/scale, h=r.height/scale; const x=n?.x||0, y=n?.y||0; minX=Math.min(minX,x); minY=Math.min(minY,y); maxX=Math.max(maxX,x+w); maxY=Math.max(maxY,y+h); });
-    if(!isFinite(minX)||!isFinite(minY)||!isFinite(maxX)||!isFinite(maxY)) return;
-    const margin=16; const frame=document.createElement('div'); frame.className='group-frame'; frame.style.left=(minX-margin)+'px'; frame.style.top=(minY-margin)+'px'; frame.style.width=(maxX-minX+margin*2)+'px'; frame.style.height=(maxY-minY+margin*2)+'px';
+    const nodeEls = (g.nodeIds||[]).map(id=> document.querySelector(`[data-node-id="${id}"]`)).filter(Boolean);
+    if(nodeEls.length){
+      nodeEls.forEach(el=>{ const id=el.dataset.nodeId; const n=getNode(id); const r=el.getBoundingClientRect(); const w=r.width/scale, h=r.height/scale; const x=n?.x||0, y=n?.y||0; minX=Math.min(minX,x); minY=Math.min(minY,y); maxX=Math.max(maxX,x+w); maxY=Math.max(maxY,y+h); });
+    } else if(g.frame){
+      // ノードがすべて削除されても枠は維持（前回保存のframe）
+      const f=g.frame; minX=f.x; minY=f.y; maxX=f.x+f.w; maxY=f.y+f.h;
+    } else {
+      // 初期サイズ（空の枠）
+      minX=80; minY=60; maxX=260; maxY=180;
+    }
+    const margin=16; const left=(minX-margin), top=(minY-margin), width=(maxX-minX+margin*2), height=(maxY-minY+margin*2);
+    g.frame = { x:left, y:top, w:width, h:height };
+    const frame=document.createElement('div'); frame.className='group-frame'; frame.style.left=left+'px'; frame.style.top=top+'px'; frame.style.width=width+'px'; frame.style.height=height+'px';
+    if(g.collapsed) frame.classList.add('collapsed');
     const title=document.createElement('div'); title.className='title'; title.textContent=g.name||'Subsystem'; frame.appendChild(title);
-    const actions=document.createElement('div'); actions.className='actions'; actions.innerHTML=`<button class="run">Run</button><button class="del">Delete</button>`; frame.appendChild(actions);
+    const actions=document.createElement('div'); actions.className='actions'; actions.innerHTML=`<button class="toggle">${g.collapsed?'Expand':'Collapse'}</button><button class="run">RUN</button><button class="copy">Copy</button><button class="del">Delete</button>`; frame.appendChild(actions);
     // タイトルドラッグでグループ移動
     let dragging=false,start=null,starts=null;
     title.addEventListener('mousedown',(e)=>{ if(e.button!==0) return; dragging=true; document.body.style.userSelect='none'; start=screenToWorldPoint(e.clientX,e.clientY); starts=(g.nodeIds||[]).map(id=>{ const n=getNode(id); return {id,x:n?.x||0,y:n?.y||0}; }); e.stopPropagation(); });
-    const onMove=(e)=>{ if(!dragging) return; const p=screenToWorldPoint(e.clientX,e.clientY); const dx=p.x-start.x, dy=p.y-start.y; (starts||[]).forEach(s=>{ const n=getNode(s.id); if(!n) return; n.x=s.x+dx; n.y=s.y+dy; const el=document.querySelector(`[data-node-id="${s.id}"]`); if(el){ el.style.left=n.x+'px'; el.style.top=n.y+'px'; } }); drawEdges(); frame.style.left=(minX-margin+dx)+'px'; frame.style.top=(minY-margin+dy)+'px'; };
-    const onUp=()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; renderGroups(); saveToLocal(); };
+    const onMove=(e)=>{ if(!dragging) return; const p=screenToWorldPoint(e.clientX,e.clientY); const dx=p.x-start.x, dy=p.y-start.y; (starts||[]).forEach(s=>{ const n=getNode(s.id); if(!n) return; n.x=s.x+dx; n.y=s.y+dy; const el=document.querySelector(`[data-node-id="${s.id}"]`); if(el){ el.style.left=n.x+'px'; el.style.top=n.y+'px'; } }); drawEdges(); frame.style.left=(left+dx)+'px'; frame.style.top=(top+dy)+'px'; };
+    const onUp=()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; g.frame = { x: parseFloat(frame.style.left)||left, y: parseFloat(frame.style.top)||top, w: width, h: height }; renderGroups(); saveToLocal(); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp, { once:true });
 
+    actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
     actions.querySelector('.run').addEventListener('click', async (e)=>{
       e.stopPropagation(); await runWithBusy(async ()=>{
   ensureWS(); statusEl.textContent='running...'; const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
       }, actions.querySelector('.run'));
     });
+    actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
     actions.querySelector('.del').addEventListener('click', (e)=>{ e.stopPropagation(); state.groups = state.groups.filter(x=> x!==g); render(); });
     groupsLayer.appendChild(frame);
+
+    // 折りたたみ時はノードを簡易的に非表示（実データは保持）
+    if(g.collapsed){
+      (g.nodeIds||[]).forEach(id=>{ const el=document.querySelector(`[data-node-id="${id}"]`); if(el){ el.style.display='none'; } });
+    } else {
+      (g.nodeIds||[]).forEach(id=>{ const el=document.querySelector(`[data-node-id="${id}"]`); if(el){ el.style.display=''; } });
+    }
   });
 }
 function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); applyViewTransform(); drawEdges(); const code = genCode(); genCodeEl.textContent = code; refreshForms(); renderSubsystems(); renderGroups(); updateRunButtonsState(); saveToLocal(); }
@@ -382,6 +478,15 @@ export async function boot(){
   }
   ensureWS();
   render();
+  // 画像クリックで拡大
+  document.addEventListener('click', (e)=>{
+    const img = e.target && e.target.tagName==='IMG' ? e.target : null;
+    if(img && img.closest('.preview')){
+      try{ openZoomOverlay(img.src); }catch{}
+    }
+  });
+  // グループ更新イベントで再描画
+  document.addEventListener('pf:groups:changed', ()=>{ try{ renderSubsystems(); renderGroups(); saveToLocal(); }catch{} });
   // マウス座標の追跡（キーボード貼り付け位置用）
   canvasWrap.addEventListener('mousemove', (e)=>{ lastMouseWorld = screenToWorldPoint(e.clientX, e.clientY); });
   // キーボードショートカット（コピー/切り取り/貼り付け/複製/削除）
@@ -406,7 +511,17 @@ export async function boot(){
     } else if(e.key==='Delete'){
       if(ids.length){ try{ deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch{} }
       e.preventDefault();
+    } else if(e.key==='Escape'){
+      if(state.pendingSrc){ try{ clearGhost(); }catch{} try{ closeQuickAdd(); }catch{} state.pendingSrc=null; document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected')); e.preventDefault(); }
     }
+  });
+  // 接続モード中に外側をクリックしたらキャンセル
+  document.addEventListener('mousedown', (e)=>{
+    try{
+      if(state.pendingSrc && !e.target.closest('.port') && !e.target.closest('#quickAdd')){
+        state.pendingSrc = null; clearGhost(); closeQuickAdd(); document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
+      }
+    }catch{}
   });
   // 追加: インタラクション初期化（最後に呼ぶ）
   window.__pf_clipboardGraph = clipboardGraph;

@@ -1,4 +1,4 @@
-import { pasteSubgraph, setSelection } from './nodes.js';
+import { pasteSubgraph, setSelection, createGroup } from './nodes.js';
 import { setGhost as setGhostMod } from './edges.js';
 import { openContextMenu, closeContextMenu } from './contextmenu.js';
 
@@ -87,6 +87,15 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
     } else {
       setSelection(ids);
     }
+    // 反映: 選択ハイライト
+    try{
+      const S = new Set(state.selection||[]);
+      document.querySelectorAll('.node').forEach(el=>{
+        const id = el.getAttribute('data-node-id');
+        if(!id) return;
+        if(S.has(id)) el.classList.add('selected'); else el.classList.remove('selected');
+      });
+    }catch{}
   });
 
   window.addEventListener('mouseup', () => {
@@ -215,7 +224,15 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
             if (newIds && newIds.length) setSelection(newIds);
           } catch {}
         }
-      }
+      },
+      { key: 'group', label: 'Group selection', disabled: !(state.selection && state.selection.size>0), onClick: ()=>{
+          try{
+            const ids = Array.from(state.selection||[]);
+            if(ids.length){ createGroup('Subsystem', ids); }
+            // UI側に再描画を促す（renderSubsystems/renderGroups呼び出しはui.js内）
+            document.dispatchEvent(new CustomEvent('pf:groups:changed'));
+          }catch{}
+        } }
     ];
     openContextMenu(items, e.clientX, e.clientY);
   });
