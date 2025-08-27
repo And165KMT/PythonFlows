@@ -34,16 +34,20 @@ export function register(reg){
   id: 'sklearn.KMeans', title: 'KMeans',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
-    defaultParams: { n_clusters:'3', random_state:'42', x:'x1', y:'x2' },
+    defaultParams: { n_clusters:'3', random_state:'42', features:'' },
     form(node, ui){
       const v=node.params||(node.params={});
       const cols = ui.getUpstreamColumns(node);
-      const opts = cols.map(c=>`<option ${v.x===c?'selected':''}>${c}</option>`).join('');
-      const opts2 = cols.map(c=>`<option ${v.y===c?'selected':''}>${c}</option>`).join('');
+      // backward-compat: migrate x/y to features CSV if present
+      if(!v.features && (v.x || v.y)){
+        const arr=[v.x,v.y].filter(Boolean);
+        v.features = arr.join(',');
+      }
+      const selected = String(v.features||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const opts = cols.map(c=>`<option value="${c}" ${selected.includes(c)?'selected':''}>${c}</option>`).join('');
       return `
         <label>n_clusters</label><input name="n_clusters" type="number" value="${v.n_clusters||'3'}">
-        <label>x</label><select name="x">${opts}</select>
-        <label>y</label><select name="y">${opts2}</select>
+        <label>features (multi-select)</label><select name="features" multiple size="${Math.min(6, Math.max(3,(cols||[]).length))}">${opts}</select>
         <label>random_state</label><input name="random_state" type="number" value="${v.random_state||'42'}">
       `;
     },
@@ -51,13 +55,25 @@ export function register(reg){
       const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const k = parseInt(node.params?.n_clusters||'3')||3;
       const rs = parseInt(node.params?.random_state||'42')||42;
-      const x = node.params?.x || 'x1';
-      const y = node.params?.y || 'x2';
+      let feats = String(node.params?.features||'').split(',').map(s=>s.trim()).filter(Boolean);
+      if(feats.length===0){
+        // fallback: auto-pick numeric columns
+        return [
+          `from sklearn.cluster import KMeans`,
+          `${v} = ${src}.copy()`,
+          `_numcols = ${src}.select_dtypes(include=['number']).columns.tolist()`,
+          `km = KMeans(n_clusters=${k}, n_init='auto', random_state=${rs})`,
+          `__X = ${src}[_numcols] if _numcols else ${src}.select_dtypes(include=['number'])`,
+          `${v}['cluster'] = km.fit_predict(__X) if len(_numcols)>0 else -1`,
+          `print(${v}.head().to_string())`
+        ];
+      }
+      const featList = '[' + feats.map(c=>`'${c}'`).join(', ') + ']';
       return [
         `from sklearn.cluster import KMeans`,
         `${v} = ${src}.copy()`,
         `km = KMeans(n_clusters=${k}, n_init='auto', random_state=${rs})`,
-        `${v}['cluster'] = km.fit_predict(${src}[[ '${x}', '${y}' ]])`,
+        `${v}['cluster'] = km.fit_predict(${src}[${featList}])`,
         `print(${v}.head().to_string())`
       ];
     }
@@ -174,6 +190,31 @@ export function register(reg){
         ? [`_sel = list(${colSel})`, `${v}[_sel] = sc.fit_transform(${v}[_sel])`]
         : [`_sel = list(${colSel})`, `${v}[[c+'${suffix}' for c in _sel]] = sc.fit_transform(${v}[_sel])`];
       return [...header, ...body, `print(${v}.head().to_string())`];
+    }
+  });
+
+  // SplitSelect: pick only train or test rows from a DataFrame produced by TrainTestSplit
+  reg.node({
+  id: 'sklearn.SplitSelect', title:'Split Select',
+  inputType: 'DataFrame',
+  outputType: 'DataFrame',
+    defaultParams: { which:'train', column:'split', drop_column:true },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>which</label><select name="which"><option value="train" ${v.which!=='test'?'selected':''}>train</option><option value="test" ${v.which==='test'?'selected':''}>test</option></select>
+      <label>split column</label><input name="column" value="${v.column||'split'}">
+      <label>drop split column</label><select name="drop_column"><option value="true" ${String(v.drop_column)!=='false'?'selected':''}>true</option><option value="false" ${String(v.drop_column)==='false'?'selected':''}>false</option></select>
+    `; },
+    code(node, ctx){
+      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const which=(node.params?.which==='test')?'test':'train';
+      const col=(node.params?.column||'split').replace(/`/g,'');
+      const drop = String(node.params?.drop_column) !== 'false';
+      return [
+        `${v} = ${src}.copy()`,
+        `${v} = ${v}.loc[${v}['${col}'] == '${which}']`,
+        drop? `${v} = ${v}.drop(columns=['${col}'], errors='ignore')` : `${v} = ${v}`,
+        `print(${v}.head().to_string())`
+      ];
     }
   });
 }

@@ -216,7 +216,9 @@ export function suggestionsForNode(fromId){
   } else if(t==='numpy.RandomNormal'){
     ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.KMeans','sklearn.ClusterPlot','python.Exec','python.For','python.While','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   } else if(t.startsWith('sklearn.')){
-    ['sklearn.KMeans','sklearn.ClusterPlot','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.TrainTestSplit','python.Exec','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
+    const extras = ['sklearn.KMeans','sklearn.ClusterPlot','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.TrainTestSplit','python.Exec','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'];
+    if(t==='sklearn.TrainTestSplit') extras.unshift('sklearn.SplitSelect');
+    extras.forEach(x=> has(x)&&acc.push(x));
   } else {
     ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.FilterRows','pandas.SelectColumns','python.Exec','python.FileReadText','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   }

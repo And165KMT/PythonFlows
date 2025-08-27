@@ -12,7 +12,9 @@ import queue
 import subprocess
 import sys
 from typing import Optional
+import os
 import time
+from .config import kernel_feature_enabled
 
 nest_asyncio.apply()
 
@@ -52,7 +54,10 @@ async def list_packages():
 
 @app.on_event("startup")
 async def startup():
-    await _start_new_kernel()
+    if kernel_feature_enabled():
+        await _start_new_kernel()
+    else:
+        print("[Kernel] Feature disabled; running without Jupyter kernel")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -67,6 +72,8 @@ async def run_graph(body: dict):
     """Run a tiny fixed Pandas flow on the kernel and return an execution id.
     For MVP: CSV -> Select -> GroupBy -> Plot (saved to a PNG file path and return path)
     """
+    if not kernel_feature_enabled():
+        return JSONResponse({"error": "kernel feature disabled"}, status_code=403)
     exec_id = str(uuid.uuid4())
     code = body.get("code")
     if not code:
@@ -80,6 +87,8 @@ async def run_graph(body: dict):
 @app.get("/api/variables")
 async def list_variables():
     """Execute a short snippet on the kernel to list global variables and return as JSON."""
+    if not kernel_feature_enabled():
+        return {"variables": []}
     if kc is None:
         return JSONResponse({"error": "kernel not ready"}, status_code=503)
     code = (
@@ -103,24 +112,26 @@ async def list_variables():
         "            r = repr(v)[:200]\n"
         "        except Exception:\n"
         "            r = '<unrepr>'\n"
-        "        html = None\n"
-        "        rows = None\n"
-        "        cols = None\n"
+    "        html = None\n"
+    "        rows = None\n"
+    "        cols = None\n"
+    "        shape = None\n"
         "        try:\n"
         "            if t == 'DataFrame':\n"
-        "                _df = v.head(5)\n"
-        "                try:\n"
-        "                    rows, cols = v.shape\n"
-        "                except Exception:\n"
-        "                    rows, cols = None, None\n"
-        "                try:\n"
-        "                    _df = _df.iloc[:, :4]\n"
-        "                except Exception:\n"
-        "                    pass\n"
-        "                html = _df.to_html(index=False, border=0)\n"
+    "                _df = v.head(5)\n"
+    "                try:\n"
+    "                    rows, cols = v.shape\n"
+    "                except Exception:\n"
+    "                    rows, cols = None, None\n"
+    "                html = _df.to_html(index=False, border=0)\n"
+    "            elif t == 'ndarray':\n"
+    "                try:\n"
+    "                    shape = tuple(v.shape)\n"
+    "                except Exception:\n"
+    "                    shape = None\n"
         "        except Exception:\n"
-        "            html = None\n"
-        "        out.append({'name': str(k), 'type': t, 'repr': r, 'html': html, 'rows': rows, 'cols': cols})\n"
+    "            html = None\n"
+    "        out.append({'name': str(k), 'type': t, 'repr': r, 'html': html, 'rows': rows, 'cols': cols, 'shape': shape})\n"
         "    print('[[VARS]]'+json.dumps(out))\n"
         "__fp_list_vars()\n"
     )
@@ -156,12 +167,16 @@ async def list_variables():
 
 @app.get("/health")
 async def health():
+    if not kernel_feature_enabled():
+        return {"kernel": "disabled"}
     ok = bool(kernel_manager)
     return {"kernel": "ok" if ok else "down"}
 
 @app.post("/restart")
 async def restart_kernel():
     """Restart the single Jupyter kernel."""
+    if not kernel_feature_enabled():
+        return JSONResponse({"error": "kernel feature disabled"}, status_code=403)
     global kernel_manager, kc
     try:
         if kc:
@@ -179,6 +194,25 @@ async def restart_kernel():
 
 async def _start_new_kernel():
     global kernel_manager, kc
+    # If a Jupyter Enterprise Gateway URL is provided, route kernel operations through it.
+    # This enables using a remote kernel hosted in Azure (e.g., AKS) transparently.
+    gw_url = os.environ.get("JUPYTER_GATEWAY_URL")
+    if gw_url:
+        try:
+            import importlib
+            mod = importlib.import_module('jupyter_client.gateway')
+            GatewayClient = getattr(mod, 'GatewayClient', None)
+            if GatewayClient is not None:
+                gc = GatewayClient.instance()
+                gc.url = gw_url
+                auth = os.environ.get("JUPYTER_GATEWAY_AUTH_TOKEN")
+                if auth:
+                    gc.auth_token = auth
+                print(f"[Kernel] Using Jupyter Gateway: {gw_url}")
+            else:
+                print("[Kernel] jupyter_client.gateway not available; falling back to local kernel")
+        except Exception as e:
+            print(f"[Kernel] Failed to configure Jupyter Gateway ({e}); falling back to local kernel")
     kernel_manager = KernelManager()
     assert kernel_manager is not None
     kernel_manager.start_kernel()
@@ -200,6 +234,11 @@ async def bootstrap():
 
 @app.websocket("/ws")
 async def ws_stream(ws: WebSocket):
+    if not kernel_feature_enabled():
+        await ws.accept()
+        await ws.send_text(json.dumps({"type": "error", "content": {"message": "kernel feature disabled"}}))
+        await ws.close()
+        return
     await ws.accept()
     try:
         while True:
