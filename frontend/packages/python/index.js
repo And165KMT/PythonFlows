@@ -1,6 +1,79 @@
 // Python/IO utilities and control-flow nodes for FlowPython
 
 export function register(reg){
+  // --- PipInstall: install a package via pip and import it ---
+  reg.node({
+    id: 'python.PipInstall', title: 'Pip Install / Import', category: 'Environment',
+    inputType: 'None',
+    outputType: 'Any',
+    defaultParams: { pkg: 'polars', version: '', extras: '', upgrade: 'false', importAs: '', setGlobal: 'true', indexUrl: '' },
+    form(node){ const v=node.params||(node.params={}); return `
+      <label>package</label>
+      <input name="pkg" value="${(v.pkg||'').replace(/"/g,'&quot;')}" placeholder="numpy or pandas">
+      <label>version (optional)</label>
+      <input name="version" value="${(v.version||'').replace(/"/g,'&quot;')}" placeholder="e.g., 2.0.0 or >=2.0">
+      <label>extras (optional)</label>
+      <input name="extras" value="${(v.extras||'').replace(/"/g,'&quot;')}" placeholder="e.g., [parquet]">
+      <label>index URL (optional)</label>
+      <input name="indexUrl" value="${(v.indexUrl||'').replace(/"/g,'&quot;')}" placeholder="https://pypi.org/simple or mirror">
+      <label>upgrade</label>
+      <select name="upgrade"><option value="false" ${String(v.upgrade||'false')!=='true'?'selected':''}>false</option><option value="true" ${String(v.upgrade)==='true'?'selected':''}>true</option></select>
+      <label>import as (alias; blank = module name)</label>
+      <input name="importAs" value="${(v.importAs||'').replace(/"/g,'&quot;')}" placeholder="pd">
+      <label>set as global</label>
+      <select name="setGlobal"><option value="true" ${String(v.setGlobal||'true')!=='false'?'selected':''}>true</option><option value="false" ${String(v.setGlobal)==='false'?'selected':''}>false</option></select>
+      <div style="font-size:12px; opacity:0.8; margin-top:6px;">Installs the package in the kernel environment, then imports it. If alias is provided, assigns to that global name for later nodes.</div>
+    `; },
+    code(node){
+      const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const pkg = String(node.params?.pkg||'').replace(/`/g,'');
+      const ver = String(node.params?.version||'').replace(/`/g,'');
+      const extras = String(node.params?.extras||'').replace(/`/g,'');
+      const idx = String(node.params?.indexUrl||'').replace(/`/g,'');
+      const up = String(node.params?.upgrade||'false')==='true';
+      const alias = String(node.params?.importAs||'').replace(/`/g,'');
+      const setG = String(node.params?.setGlobal||'true')!=='false';
+      const requirement = `${pkg}${extras||''}${ver? ('==' + ver): ''}`;
+  return [
+        `import sys, subprocess, importlib` ,
+        `__req = r'''${requirement}'''` ,
+        `_args = [sys.executable, '-m', 'pip', 'install']` ,
+        `${up ? `_args.append('--upgrade')` : 'pass'}` ,
+        `if r'''${idx}''': _args.extend(['-i', r'''${idx}'''])` ,
+        `_args.append(__req)` ,
+        `print('[pip]', ' '.join(_args))` ,
+        `try:
+  _out = subprocess.check_output(_args, stderr=subprocess.STDOUT, text=True)
+  print(_out[-1200:])
+except Exception as _e:
+  try:
+    print(getattr(_e, 'output', '')[-1200:])
+  except Exception:
+    pass
+  print('PIP_ERROR:', _e)` ,
+        `# Import the module
+try:
+  _mod_name = r'''${pkg}'''.split('[')[0] if r'''${pkg}''' else ''
+  _mod = importlib.import_module(_mod_name) if _mod_name else None
+  ${setG ? `globals()[r'''${alias||''}'''] = _mod if r'''${alias||''}''' else globals().setdefault(_mod_name, _mod)` : 'pass'}
+  ${v} = _mod
+  try:
+    _ver = getattr(_mod, '__version__', None)
+    print(f"[import] {alias || '${pkg}'} version: {_ver}")
+  except Exception:
+    pass
+  # Magic marker to let UI auto-generate nodes for this module
+  try:
+    print(f"[[INTROSPECT_MODULE:{_mod_name}]]")
+  except Exception:
+    pass
+except Exception as _e:
+  print('IMPORT_ERROR:', _e)
+  ${v} = None`
+      ];
+    }
+  });
+
   // --- ListCreate: simple DataFrame source from a comma-separated list ---
   reg.node({
     id: 'python.ListCreate', title: 'ListCreate', category: 'Sources',
@@ -257,7 +330,11 @@ else:
         return [ `${v} = ${src}`, `print(f"[[DOWNLOAD:${node.id}:CSV]]" + ${v}.to_csv(index=False))`, `print(${v}.head().to_string())` ];
       }
       const path = (node.params?.path||'').replace(/`/g,'');
-      return [ `${v} = ${src}`, `try: ${v}.to_csv(_fp_render(r'''${path}'''), index=False)\nexcept Exception as e: print('WRITE_ERROR:', e)`, `print(${v}.head().to_string())` ];
+      return [
+        `${v} = ${src}`,
+        `try:\n  ${v}.to_csv(_fp_render(r'''${path}'''), index=False)\nexcept Exception as e:\n  print('WRITE_ERROR:', e)`,
+        `print(${v}.head().to_string())`
+      ];
     }
   });
 
@@ -305,7 +382,7 @@ else:
       const elseBody=(node.params?.else||'').replace(/`/g,'');
       return [
         `${v} = ${src}`,
-        `try: _cond = bool(eval(r'''${cond}'''))\nexcept Exception: _cond = False`,
+  `try:\n  _cond = bool(eval(r'''${cond}'''))\nexcept Exception:\n  _cond = False`,
         `if _cond:\n    df = ${v}\n    exec(r'''${thenBody}''')\n    ${v} = df\nelse:\n    df = ${v}\n    exec(r'''${elseBody}''')\n    ${v} = df`,
         `print(${v}.head().to_string())`
       ];
@@ -564,8 +641,10 @@ try:
   elif isinstance(${v}, dict):
     ${v} = pd.DataFrame([${v}]) if _o!='index' else pd.DataFrame.from_dict(${v}, orient='index').T
   elif 'numpy' in str(type(${v})) or isinstance(${v}, getattr(_np, 'ndarray', tuple)):
-    try: ${v} = pd.DataFrame(${v})
-    except Exception: ${v} = pd.DataFrame()
+    try:
+      ${v} = pd.DataFrame(${v})
+    except Exception:
+      ${v} = pd.DataFrame()
   else:
     ${v} = pd.DataFrame({'value':[${v}]})
 except Exception:
@@ -671,13 +750,16 @@ except Exception:
     except Exception:
       _obj = None
     if isinstance(_obj, list):
-  ${v} = pd.DataFrame(_obj) if (_mode in ('auto','records')) else pd.DataFrame({'value':_obj})
-  print('[JsonParse:auto] interpreted as records') if _mode == 'auto' else None
+      ${v} = pd.DataFrame(_obj) if (_mode in ('auto','records')) else pd.DataFrame({'value': _obj})
+      print('[JsonParse:auto] interpreted as records') if _mode == 'auto' else None
     elif isinstance(_obj, dict):
-  ${v} = pd.DataFrame([_obj]) if (_mode in ('auto','object')) else pd.DataFrame.from_dict(_obj, orient='index').T
-  print('[JsonParse:auto] interpreted as object') if _mode == 'auto' else None
+      if _mode in ('auto','object'):
+        ${v} = pd.DataFrame([_obj])
+      else:
+        ${v} = pd.DataFrame.from_dict(_obj, orient='index').T
+      print('[JsonParse:auto] interpreted as object') if _mode == 'auto' else None
     else:
-      ${v} = pd.DataFrame({'value':[ _obj ]})
+      ${v} = pd.DataFrame({'value': [_obj]})
 except Exception as _e:
   print('JSON_PARSE_ERROR:', _e)`,
         `print(${v}.head().to_string()) if _is_df else print(${v}.head().to_string())`

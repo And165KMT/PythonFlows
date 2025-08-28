@@ -11,4 +11,7 @@ set HOST=127.0.0.1
 set PORT=8000
 if not "%1"=="" set PORT=%1
 
-%PY% -m uvicorn backend.main:app --reload --host %HOST% --port %PORT%
+REM Reduce VS Code debugger warning
+set PYDEVD_DISABLE_FILE_VALIDATION=1
+
+%PY% -Xfrozen_modules=off -m uvicorn backend.main:app --reload --host %HOST% --port %PORT%

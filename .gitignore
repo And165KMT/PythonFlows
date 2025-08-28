@@ -2,3 +2,4 @@
 *.vscode
 __pycache__/
 仕様書.md
+.env

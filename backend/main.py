@@ -5,13 +5,16 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import json
 import uuid
-import nest_asyncio
 from jupyter_client.manager import KernelManager
 from pathlib import Path
 import queue
 import subprocess
 import sys
 from typing import Optional
+import inspect
+import importlib
+import types as pytypes
+from typing import get_type_hints, get_origin, get_args
 import os
 import time
 from .config import kernel_feature_enabled, auth_required, get_api_token, exec_timeout_seconds, export_max_rows_default
@@ -25,7 +28,8 @@ except Exception:  # fallback if pydantic v1 already available without import pa
 from .exec_control import exec_registry, enforce_timeout_and_interrupt
 import re
 
-nest_asyncio.apply()
+# Optional: only apply nest_asyncio when explicitly requested (off by default)
+ # nest_asyncio removed; uvicorn runs with asyncio loop
 
 app = FastAPI()
 app.add_middleware(
@@ -35,6 +39,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Minimize VS Code debugger frozen modules warnings in spawned kernels
+try:
+    os.environ.setdefault("PYDEVD_DISABLE_FILE_VALIDATION", "1")
+except Exception:
+    pass
 
 kernel_manager: Optional[KernelManager] = None
 kc = None  # type: ignore
@@ -75,6 +85,183 @@ async def list_packages():
             if child.is_dir() and (child / "index.js").exists():
                 pkgs.append({"name": child.name, "label": child.name.capitalize(), "entry": "index.js"})
     return pkgs
+
+# --- Minimal autogen NodeSpec endpoint (pilot) ---
+@app.get("/api/autogen")
+async def api_autogen_nodes(_: bool = Depends(require_auth)):
+    """Return a minimal set of NodeSpec objects that the frontend can turn into nodes.
+    Pilot: pandas.read_csv only, with a small curated parameter set.
+    """
+    spec = {
+        "nodes": [
+            {
+                "id": "autogen.pandas.read_csv",
+                "title": "pandas.read_csv (auto)",
+                "category": "IO",
+                "inputType": "None",
+                "outputType": "DataFrame",
+                "call": { "kind": "function", "target": "pd.read_csv" },
+                "imports": ["import pandas as pd"],
+                "params": [
+                    {"name": "mode", "type": "enum", "enum": ["inline", "path", "upload", "folder"], "default": "inline", "ui": "select", "label": "Source"},
+                    {"name": "inline", "type": "text", "default": "city,temp\nTokyo,30\nOsaka,31\n", "ui": "textarea", "label": "CSV", "when": "mode=inline"},
+                    {"name": "path", "type": "string", "default": "", "ui": "string", "label": "Path", "when": "mode=path"},
+                    {"name": "upload", "type": "string", "default": "", "ui": "upload", "label": "Upload", "when": "mode=upload"},
+                    {"name": "dir", "type": "string", "default": "", "ui": "string", "label": "Folder", "when": "mode=folder"},
+                    {"name": "sep", "type": "string", "default": ",", "ui": "string", "label": "sep", "advanced": True},
+                    {"name": "header", "type": "string", "default": "infer", "ui": "string", "label": "header", "advanced": True}
+                ]
+            }
+        ]
+    }
+    return spec
+
+# --- Generic introspection endpoint for arbitrary callables ---
+def _resolve_target(target: str):
+    parts = (target or '').split('.')
+    if len(parts) < 2:
+        raise ImportError("target must be module.attr")
+    # Try longest module prefix
+    for i in range(len(parts), 0, -1):
+        mod_name = '.'.join(parts[:i])
+        try:
+            mod = importlib.import_module(mod_name)
+            obj = mod
+            for name in parts[i:]:
+                obj = getattr(obj, name)
+            return obj, mod_name, '.'.join(parts[i:])
+        except Exception:
+            continue
+    raise ImportError(f"cannot import target: {target}")
+
+def _map_type_hint(ann) -> dict:
+    try:
+        if ann is inspect._empty:
+            return {"type": "any", "ui": "string"}
+        origin = get_origin(ann)
+        args = get_args(ann)
+        # Literal choices
+        if str(getattr(origin, '__name__', '')) == 'Literal' or str(origin).endswith('.Literal'):
+            try:
+                choices = [a for a in args]
+                return {"type": "enum", "enum": choices, "ui": "select"}
+            except Exception:
+                return {"type": "string", "ui": "string"}
+        # Optional[T]
+        if origin is pytypes.UnionType or str(origin).endswith('Union'):
+            # best-effort: pick first non-None
+            non_none = [a for a in args if a is not type(None)]  # noqa: E721
+            return _map_type_hint(non_none[0] if non_none else inspect._empty)
+        # Primitive types
+        if ann in (int, float):
+            return {"type": "number", "ui": "string"}
+        if ann is bool:
+            return {"type": "bool", "ui": "select", "enum": [True, False]}
+        if ann is str:
+            return {"type": "string", "ui": "string"}
+        # Fallback
+        return {"type": getattr(getattr(ann, '__name__', None), 'lower', lambda: 'any')(), "ui": "string"}
+    except Exception:
+        return {"type": "any", "ui": "string"}
+
+def _build_nodespec_from_callable(obj, fq_name: str) -> dict:
+    # Determine callable and kind
+    kind = 'function'
+    fn = obj
+    if isinstance(obj, type):
+        fn = obj.__init__
+        kind = 'constructor'
+    elif inspect.ismethod(obj):
+        kind = 'method'
+    elif inspect.isfunction(obj):
+        kind = 'function'
+    elif callable(obj):
+        kind = 'callable'
+    # Signature and hints
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        sig = None
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        hints = {}
+    params = []
+    if sig is not None:
+        for name, p in sig.parameters.items():
+            if name in ('self', 'cls'):
+                continue
+            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                # skip *args/**kwargs for UI purposes
+                continue
+            ann = hints.get(name, p.annotation)
+            mapped = _map_type_hint(ann)
+            spec = {
+                "name": name,
+                "label": name,
+                "type": mapped.get("type", "any"),
+                "ui": mapped.get("ui", "string"),
+            }
+            if 'enum' in mapped:
+                spec['enum'] = mapped['enum']
+            if p.default is not inspect._empty:
+                try:
+                    spec['default'] = p.default
+                except Exception:
+                    pass
+            else:
+                spec['required'] = True
+            params.append(spec)
+    title = f"{fq_name} (auto)"
+    node_id = f"autogen.{fq_name}"
+    return {
+        "id": node_id,
+        "title": title,
+        "category": "Auto",
+        "inputType": "Any",
+        "outputType": "Any",
+        "call": {"kind": kind, "target": fq_name},
+        "params": params,
+    }
+
+@app.get("/api/introspect")
+async def api_introspect(target: str, _: bool = Depends(require_auth)):
+    try:
+        obj, mod_name, attr_path = _resolve_target(target)
+        fq = f"{mod_name}.{attr_path}" if attr_path else mod_name
+        spec = _build_nodespec_from_callable(obj, fq)
+        return {"nodes": [spec]}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+@app.get("/api/introspect_module")
+async def api_introspect_module(module: str, limit: int = 12, public: bool = True, _: bool = Depends(require_auth)):
+    try:
+        mod = importlib.import_module(module)
+    except Exception as e:
+        return JSONResponse({"error": f"cannot import module: {e}"}, status_code=400)
+    items = []
+    try:
+        members = inspect.getmembers(mod)
+        for name, obj in members:
+            if public and name.startswith('_'):
+                continue
+            try:
+                if inspect.isfunction(obj) or inspect.isbuiltin(obj) or inspect.ismethod(obj) or inspect.isclass(obj):
+                    fq = f"{module}.{name}"
+                    try:
+                        spec = _build_nodespec_from_callable(obj, fq)
+                        items.append(spec)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        # Sort by id/name and cap
+        items.sort(key=lambda x: x.get('id',''))
+        items = items[: max(1, min(100, int(limit or 12))) ]
+    except Exception:
+        items = []
+    return {"nodes": items}
 
 @app.on_event("startup")
 async def startup():
@@ -254,9 +441,25 @@ async def _start_new_kernel():
                 print("[Kernel] jupyter_client.gateway not available; falling back to local kernel")
         except Exception as e:
             print(f"[Kernel] Failed to configure Jupyter Gateway ({e}); falling back to local kernel")
+    # Ensure child Python disables frozen modules for better debugging experience
+    try:
+        os.environ.setdefault("PYTHONOPTIMIZE", "0")
+        os.environ.setdefault("PYDEVD_DISABLE_FILE_VALIDATION", "1")
+    except Exception:
+        pass
     kernel_manager = KernelManager()
     assert kernel_manager is not None
-    kernel_manager.start_kernel()
+    # try to append -Xfrozen_modules=off to the kernel argv
+    try:
+        # Respect the default kernel spec, but inject flag when possible
+        extra = os.environ.get("PYFLOWS_KERNEL_EXTRA_ARGS", "-Xfrozen_modules=off").strip()
+        if extra:
+            # jupyter-client KernelManager passes extra arguments via 'extra_arguments'
+            kernel_manager.start_kernel(extra_arguments=extra.split())
+        else:
+            kernel_manager.start_kernel()
+    except TypeError:
+        kernel_manager.start_kernel()
     kc = kernel_manager.client()
     kc.start_channels()
 

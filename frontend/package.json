@@ -1,0 +1,14 @@
+{
+  "name": "flowpython-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:int": "vitest run -t integration"
+  },
+  "devDependencies": {
+  "vitest": "^1.6.0",
+  "ws": "^8.17.0"
+  }
+}

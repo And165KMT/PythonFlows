@@ -111,3 +111,11 @@ Container-ready: A production-friendly `Dockerfile` is included.
 	- `python.SetGlobal`: assign multiple lines `name = expr`.
 	- `python.GetGlobal`: import a chosen global into the flow as a DataFrame row.
 	- Most forms include a “Load Variables” helper to click-insert variable names.
+
+	## Autogen nodes (pilot)
+
+	Branch `feature/autogen-nodes` adds a minimal auto-generation pipeline:
+	- Backend endpoint `/api/autogen` returns NodeSpec for selected functions (pilot: `pandas.read_csv`).
+	- Frontend `runtime.js` loads these specs and registers nodes dynamically under the `autogen` package.
+
+	This is experimental and lives alongside existing hand-written nodes (`frontend/packages/*`).

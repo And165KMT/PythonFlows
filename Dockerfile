@@ -31,4 +31,4 @@ ENV PORT=8000
 EXPOSE 8000
 
 # Start server (bind to all interfaces); PORT is honored if provided by the platform
-CMD ["sh","-c","python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh","-c","python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --loop asyncio"]

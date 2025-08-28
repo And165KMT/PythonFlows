@@ -91,6 +91,28 @@ async function runWithBusy(fn, btn, runningLabel){
   }catch(err){ runningLock = false; updateRunButtonsState(); appendLog('[run] error ' + (err && err.message ? err.message : String(err))); }
 }
 
+// Sync all visible form inputs into state.node.params (handles focused fields not yet committed)
+function syncFormsToState(){
+  try{
+    document.querySelectorAll('.node').forEach(nodeEl=>{
+      const id = nodeEl.getAttribute('data-node-id');
+      if(!id) return;
+      const node = getNode(id); if(!node) return;
+      node.params = node.params || {};
+      nodeEl.querySelectorAll('.body input, .body select, .body textarea').forEach(inp=>{
+        const name = inp.name || '';
+        if(!name) return;
+        if(inp.tagName === 'SELECT' && inp.multiple){
+          const arr = Array.from(inp.selectedOptions || []).map(o=> o.value || o.text).filter(Boolean);
+          node.params[name] = arr.join(',');
+        } else {
+          node.params[name] = inp.value;
+        }
+      });
+    });
+  }catch{}
+}
+
 // Simple image zoom overlay
 function openZoomOverlay(src){
   try{
@@ -163,7 +185,8 @@ const tabsBar = document.createElement('div'); tabsBar.style.display='flex'; tab
 const globalRunBtn = document.createElement('button'); globalRunBtn.textContent='▶ Run All'; Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' }); globalRunBtn.addEventListener('click', async ()=>{
   await runWithBusy(async ()=>{
     ensureWS(); clearLog(); statusEl.textContent='running...';
-    const code = genCode(); genCodeEl.textContent = code;
+  syncFormsToState();
+  const code = genCode(); genCodeEl.textContent = code;
     const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
     let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec: ' + JSON.stringify(js));
@@ -368,6 +391,7 @@ function createNodeEl(node){
       runBtn.addEventListener('click', async ()=>{
         await runWithBusy(async()=>{
           ensureWS(); statusEl.textContent='running...';
+          syncFormsToState();
           const code = genCodeUpTo(node.id); genCodeEl.textContent = code;
           const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
           let js={}; try{ js=await res.json(); }catch{}
@@ -498,7 +522,8 @@ function renderSubsystems(){
       const gid = btn.getAttribute('data-gid'); const g = getGroup(gid); if(!g) return;
       await runWithBusy(async ()=>{
         ensureWS(); statusEl.textContent='running...';
-        const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code;
+  syncFormsToState();
+  const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code;
   const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec (group): ' + JSON.stringify(js));
       }, btn, 'Running...');
@@ -561,7 +586,7 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
     actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
     actions.querySelector('.run').addEventListener('click', async (e)=>{
       e.stopPropagation(); await runWithBusy(async ()=>{
-  ensureWS(); statusEl.textContent='running...'; const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
+  ensureWS(); statusEl.textContent='running...'; syncFormsToState(); const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
       }, actions.querySelector('.run'));
     });
     actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
@@ -580,7 +605,71 @@ function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendC
 function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n), getUpstreamNode: ()=> upstreamOf(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindFormMod(el, n, refreshForms); } }); }
 
 // WebSocket & streaming
-let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const streamName = (data.content && data.content.name) ? data.content.name : ''; const t = data.content.text || ''; if(streamName==='stderr'){ t.split(/\r?\n/).forEach(ln=>{ if(ln) appendLog(ln, 'stderr'); }); return; } const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; /* INSERT START: handle [[SKIP:nid]] */ let msK = ln.match(/^\[\[SKIP:([^\]]+)\]\]$/); if(msK){ const nid = msK[1]; const title = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(title){ const old = title.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent='skip'; title.appendChild(chip); } appendLog(`[node ${nid}] unchanged -> skip`); continue; } /* INSERT END */ let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ const nid = mb[1]; state.stream.currentNodeId = nid; state.preview.head.delete(nid); state.preview.desc.delete(nid); state.preview.headHtml.delete(nid); state.preview.descHtml.delete(nid); state.stream.buffers.set(nid, ''); state.stream.timings = state.stream.timings || new Map(); state.stream.timings.set(nid, { start: performance.now() }); const tgt = document.getElementById('prev-' + nid); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ const nid = me[1]; const rec = (state.stream.timings && state.stream.timings.get(nid)) || null; const end = performance.now(); const ms = rec && rec.start ? Math.max(0, Math.round(end - rec.start)) : null; state.stream.currentNodeId = null; if(ms!=null){ const tgt = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(tgt){ const old = tgt.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent = `${ms} ms`; tgt.appendChild(chip); } } continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue), 'error'); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
+let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = async ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const streamName = (data.content && data.content.name) ? data.content.name : ''; const t = data.content.text || ''; if(streamName==='stderr'){ t.split(/\r?\n/).forEach(ln=>{ if(ln) appendLog(ln, 'stderr'); }); return; } const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; /* INSERT START: handle [[SKIP:nid]] */ let msK = ln.match(/^\[\[SKIP:([^\]]+)\]\]$/); if(msK){ const nid = msK[1]; const title = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(title){ const old = title.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent='skip'; title.appendChild(chip); } appendLog(`[node ${nid}] unchanged -> skip`); continue; } /* INSERT END */
+        // Auto-introspect module marker: [[INTROSPECT_MODULE:module.path]]
+        let mm = ln.match(/^\[\[INTROSPECT_MODULE:([^\]]+)\]\]$/);
+        if(mm){
+          const mod = mm[1];
+          try{
+            const res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(mod));
+            const js = await res.json().catch(()=>({}));
+            const arr = Array.isArray(js.nodes) ? js.nodes : [];
+            if(arr.length){
+              if(!registry.byPackage.has('autogen')) registry.byPackage.set('autogen', []);
+              if(!registry.packages.some(p=> p.name==='autogen')) registry.packages.push({ name:'autogen', label:'Autogen', entry:'' });
+              for(const spec of arr){
+                const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
+                if(registry.nodes.has(id)) continue;
+                const def = {
+                  id,
+                  title: spec.title || id,
+                  category: spec.category || 'Auto',
+                  inputType: spec.inputType || 'Any',
+                  outputType: spec.outputType || 'Any',
+                  defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
+                  form(node){
+                    const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
+                    const fields = (spec.params||[]).filter(p=> !p.hidden);
+                    function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
+                    function inputFor(p){ const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string'; if(ui==='select' && Array.isArray(p.enum)){ const opts=p.enum.map(x=>`<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join(''); return `<label>${label}</label><select name="${name}">${opts}</select>`; } if(ui==='textarea'){ return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`; } return `<label>${label}</label><input name="${name}" value="${val||''}">`; }
+                    const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
+                    const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
+                    return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
+                  },
+                  code(node){
+                    const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+                    const p = node.params||{};
+                    const params = (spec.params||[])
+                      .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
+                      .filter(x=> p[x.name]!==undefined)
+                      .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
+                      .join(', ');
+                    const target = spec.call?.target || '';
+                    const parts = target.split('.');
+                    const root = parts[0] || '';
+                    const modPath = parts.slice(0, -1).join('.');
+                    const seg = [];
+                    if(root){ seg.push(`import ${root}`); }
+                    if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
+                    seg.push(`${v} = ${target}(${params})`);
+                    seg.push(`print(${v})`);
+                    return seg;
+                  }
+                };
+                registry.nodes.set(id, def);
+                registry.byPackage.get('autogen').push(id);
+              }
+              renderToolbar();
+              appendLog(`[autogen] ${arr.length} node(s) from ${mod}`);
+            } else {
+              appendLog(`[autogen] no callables found in ${mod}`);
+            }
+          }catch(e){ appendLog('[autogen] failed for ' + mod); }
+          continue;
+        }
+        // End auto-introspect marker handling
+        
+        let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ const nid = mb[1]; state.stream.currentNodeId = nid; state.preview.head.delete(nid); state.preview.desc.delete(nid); state.preview.headHtml.delete(nid); state.preview.descHtml.delete(nid); state.stream.buffers.set(nid, ''); state.stream.timings = state.stream.timings || new Map(); state.stream.timings.set(nid, { start: performance.now() }); const tgt = document.getElementById('prev-' + nid); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ const nid = me[1]; const rec = (state.stream.timings && state.stream.timings.get(nid)) || null; const end = performance.now(); const ms = rec && rec.start ? Math.max(0, Math.round(end - rec.start)) : null; state.stream.currentNodeId = null; if(ms!=null){ const tgt = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(tgt){ const old = tgt.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent = `${ms} ms`; tgt.appendChild(chip); } } continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue), 'error'); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
 
 function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id); }
 
@@ -598,7 +687,8 @@ export async function boot(){
   const signBtn = document.createElement('button'); signBtn.id='signBtn'; signBtn.className='secondary'; signBtn.textContent='Sign in';
   const saveFlowBtn = document.createElement('button'); saveFlowBtn.id='saveFlowBtn'; saveFlowBtn.className='secondary'; saveFlowBtn.textContent='Save Flow';
   const loadFlowBtn = document.createElement('button'); loadFlowBtn.id='loadFlowBtn'; loadFlowBtn.className='secondary'; loadFlowBtn.textContent='Load Flow';
-  actionsEl?.appendChild(saveFlowBtn); actionsEl?.appendChild(loadFlowBtn); actionsEl?.appendChild(signBtn);
+  const addTargetBtn = document.createElement('button'); addTargetBtn.id='addTargetBtn'; addTargetBtn.className='secondary'; addTargetBtn.textContent='Add Target'; addTargetBtn.title='Create a node from fully-qualified name via introspection';
+  actionsEl?.appendChild(saveFlowBtn); actionsEl?.appendChild(loadFlowBtn); actionsEl?.appendChild(addTargetBtn); actionsEl?.appendChild(signBtn);
 
   signBtn.addEventListener('click', ()=>{
     const cur = getStoredToken();
@@ -632,6 +722,63 @@ export async function boot(){
         appendLog('[flow] invalid flow file');
       }
     }catch(e){ appendLog('[flow] load failed'); }
+  });
+
+  // Add Target: create node spec from callable via backend introspection
+  addTargetBtn.addEventListener('click', async ()=>{
+    try{
+      const tgt = window.prompt('Enter fully-qualified callable (e.g., pandas.read_csv or sklearn.cluster.KMeans):', 'pandas.read_csv');
+      if(!tgt) return;
+      const res = await apiFetch('/api/introspect?target=' + encodeURIComponent(tgt));
+      const js = await res.json().catch(()=>({}));
+      const arr = Array.isArray(js.nodes) ? js.nodes : [];
+      if(!arr.length){ appendLog('[introspect] no spec'); return; }
+      if(!registry.byPackage.has('autogen')) registry.byPackage.set('autogen', []);
+      if(!registry.packages.some(p=> p.name==='autogen')) registry.packages.push({ name:'autogen', label:'Autogen', entry:'' });
+      for(const spec of arr){
+        const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
+        const def = {
+          id,
+          title: spec.title || id,
+          category: spec.category || 'Auto',
+          inputType: spec.inputType || 'Any',
+          outputType: spec.outputType || 'Any',
+          defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
+          form(node){
+            const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
+            const fields = (spec.params||[]).filter(p=> !p.hidden);
+            function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
+            function inputFor(p){ const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string'; if(ui==='select' && Array.isArray(p.enum)){ const opts=p.enum.map(x=>`<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join(''); return `<label>${label}</label><select name="${name}">${opts}</select>`; } if(ui==='textarea'){ return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`; } return `<label>${label}</label><input name="${name}" value="${val||''}">`; }
+            const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
+            const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
+            return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
+          },
+          code(node){
+            const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+            const p = node.params||{};
+            const params = (spec.params||[])
+              .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
+              .filter(x=> p[x.name]!==undefined)
+              .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
+              .join(', ');
+            const target = spec.call?.target || '';
+            const parts = target.split('.');
+            const root = parts[0] || '';
+            const modPath = parts.slice(0, -1).join('.');
+            const seg = [];
+            if(root){ seg.push(`import ${root}`); }
+            if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
+            seg.push(`${v} = ${target}(${params})`);
+            seg.push(`print(${v})`);
+            return seg;
+          }
+        };
+        registry.nodes.set(id, def);
+        registry.byPackage.get('autogen').push(id);
+      }
+      renderToolbar();
+      appendLog('[introspect] added ' + arr.length + ' node(s) to Autogen');
+    }catch(e){ appendLog('[introspect] failed'); }
   });
 
   // Buttons

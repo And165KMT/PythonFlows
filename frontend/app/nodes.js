@@ -607,7 +607,10 @@ export async function loadPackages(){
   try{
     const res = await fetch('/api/packages');
     const list = await res.json();
-    registry.packages = Array.isArray(list) ? list.map(x=> ({name:x.name, label:x.label, entry:x.entry})) : [];
+  const serverPkgs = Array.isArray(list) ? list.map(x=> ({name:x.name, label:x.label, entry:x.entry})) : [];
+  // Preserve any pre-registered dynamic packages (e.g., autogen) by merging extras
+  const extras = (registry.packages||[]).filter(p=> !serverPkgs.some(sp=> sp.name===p.name));
+  registry.packages = [...serverPkgs, ...extras];
     for(const p of (Array.isArray(list)? list: [])){
       try{
         const mod = await import(`/pkg/${p.name}/${p.entry}`);

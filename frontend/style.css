@@ -81,6 +81,11 @@ header h1 { margin: 0; font-size: 18px; }
 .input { background:#0b1018; color:var(--text); border:1px solid #2a3445; border-radius:6px; padding:6px; font-size:12px; }
 
 /* Group frame collapsed state */
+.group-frame { position:absolute; border:2px solid #2a3445; border-radius:10px; background: rgba(16,22,32,0.35); color: var(--text); padding: 8px 10px 10px 10px; }
+.group-frame .title { font-weight:700; margin-bottom:6px; }
+.group-frame .actions { display:flex; gap:6px; }
+.group-frame .actions button { pointer-events:auto; background:#111824; color:var(--text); border:1px solid #2a3445; border-radius:6px; padding:4px 8px; cursor:pointer; }
+.group-frame .actions .run { background: var(--accent); color:#fff; border:0; }
 .group-frame.collapsed{ background: rgba(31,111,235,0.03); border:2px dotted #385a9a; }
 
 /* Right panel tabs */
