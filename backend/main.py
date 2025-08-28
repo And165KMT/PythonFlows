@@ -17,7 +17,7 @@ import types as pytypes
 from typing import get_type_hints, get_origin, get_args
 import os
 import time
-from .config import kernel_feature_enabled, auth_required, get_api_token, exec_timeout_seconds, export_max_rows_default
+from .config import kernel_feature_enabled, auth_required, get_api_token, exec_timeout_seconds, export_max_rows_default, variables_list_timeout_seconds, export_timeout_seconds, upload_max_mb_default
 from .auth import require_auth, require_ws_auth
 from .flows import list_flows, save_flow, load_flow, delete_flow
 from .flow_models import FlowModel
@@ -68,6 +68,56 @@ def _safe_filename(name: str) -> str:
         ext = ''.join(Path(name).suffixes)
         return (stem + ext)[:128]
     return name
+
+def json_error(message: str, status: int = 400):
+    return JSONResponse({"error": message}, status_code=status)
+
+async def _execute_and_collect(code: str, match_predicate, register_timeout: bool = True, wait_timeout: float = 5.0):
+    """Execute code in the kernel and collect iopub messages until predicate matches or idle/timeout.
+
+    match_predicate(msg) -> Optional[value]; when non-None, returned early with value.
+    """
+    global kc
+    if kc is None:
+        return None
+    async with iopub_gate:
+        msg_id = kc.execute(code)
+        if register_timeout and exec_timeout_seconds() > 0:
+            try:
+                await exec_registry.register(msg_id, time.time())
+                asyncio.create_task(enforce_timeout_and_interrupt(kernel_manager, kc, msg_id))
+            except Exception:
+                pass
+        deadline = time.time() + float(wait_timeout)
+        result = None
+        try:
+            while time.time() < deadline:
+                try:
+                    msg = kc.get_iopub_msg(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+                val = None
+                try:
+                    val = match_predicate(msg)
+                except Exception:
+                    val = None
+                if val is not None:
+                    result = val
+                    break
+                # Stop when idle for our execution
+                mtype = msg.get("header", {}).get("msg_type")
+                content = msg.get("content", {})
+                if mtype == "status" and content.get("execution_state") == "idle":
+                    break
+        except Exception:
+            pass
+    try:
+        await exec_registry.resolve(msg_id)
+    except Exception:
+        pass
+    return result
 
 @app.get("/")
 async def index():
@@ -359,38 +409,18 @@ async def list_variables(_: bool = Depends(require_auth)):
         "    print('[[VARS]]'+json.dumps(out))\n"
         "__fp_list_vars()\n"
     )
-    vars_json = None
-    async with iopub_gate:
-        msg_id = kc.execute(code)
-        # Wait for output related to this execution
-        deadline = time.time() + 3.0
-        try:
-            while time.time() < deadline:
-                try:
-                    msg = kc.get_iopub_msg(timeout=0.2)
-                except queue.Empty:
-                    continue
-                # Only consider messages for our execution
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
-                    continue
-                mtype = msg.get("header", {}).get("msg_type")
-                content = msg.get("content", {})
-                if mtype == "stream" and content.get("text", "").startswith("[[VARS]]"):
-                    payload = content.get("text", "")[8:]
-                    try:
-                        vars_json = json.loads(payload)
-                    except Exception:
-                        vars_json = []
-                    # We have the payload; return early to reduce latency
-                    break
-                elif mtype == "status" and content.get("execution_state") == "idle":
-                    break
-        except Exception:
-            pass
-    try:
-        await exec_registry.resolve(msg_id)
-    except Exception:
-        pass
+    def _match(msg):
+        mtype = msg.get("header", {}).get("msg_type")
+        content = msg.get("content", {})
+        if mtype == "stream" and content.get("text", "").startswith("[[VARS]]"):
+            payload = content.get("text", "")[8:]
+            try:
+                return json.loads(payload)
+            except Exception:
+                return []
+        return None
+
+    vars_json = await _execute_and_collect(code, _match, register_timeout=False, wait_timeout=variables_list_timeout_seconds())
     return {"variables": vars_json or []}
 
 @app.get("/health")
@@ -499,14 +529,24 @@ async def api_list_uploads(_: bool = Depends(require_auth)):
 @app.post("/api/uploads")
 async def api_upload_file(file: UploadFile = File(...), _: bool = Depends(require_auth)):
     try:
+        max_mb = upload_max_mb_default()
         name = _safe_filename(file.filename or "file")
         dest = _uploads_dir() / name
         # stream write
         with dest.open("wb") as f:
+            total = 0
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
+                total += len(chunk)
+                if max_mb and max_mb > 0 and total > max_mb * 1024 * 1024:
+                    try:
+                        f.close()
+                        dest.unlink(missing_ok=True)  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    return json_error("upload too large", 413)
                 f.write(chunk)
         abs_path = str(dest.resolve())
         return {"ok": True, "name": name, "path": abs_path}
@@ -631,6 +671,8 @@ async def export_variable(name: str, format: str = "csv", rows: Optional[int] = 
     fmt = (format or "csv").lower()
     max_rows = export_max_rows_default()
     nrows = max(1, min(max_rows, int(rows or max_rows)))
+    # conservative safe name
+    safe_var = re.sub(r"[^A-Za-z0-9_]+", "", name)[:128] or name
     # Build code to serialize the variable
     code = (
         "import json, io\n"
@@ -694,45 +736,24 @@ async def export_variable(name: str, format: str = "csv", rows: Optional[int] = 
         "        print('[[EXPORT:TEXT]]'+repr(v))\n"
         "    except Exception:\n"
         "        print('[[EXPORT:TEXT]]<unrepr>')\n"
-        f"__fp_export('{name}', '{fmt}', {nrows})\n"
+        f"__fp_export({json.dumps(safe_var)}, {json.dumps(fmt)}, {int(nrows)})\n"
     )
-    payload = []
-    kind = None  # 'CSV' or 'TEXT'
-    deadline = time.time() + 5.0
-    async with iopub_gate:
-        msg_id = kc.execute(code)
-        if exec_timeout_seconds() > 0:
-            try:
-                await exec_registry.register(msg_id, time.time())
-                asyncio.create_task(enforce_timeout_and_interrupt(kernel_manager, kc, msg_id))
-            except Exception:
-                pass
-        try:
-            while time.time() < deadline:
-                try:
-                    msg = kc.get_iopub_msg(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
-                    continue
-                mtype = msg.get("header", {}).get("msg_type")
-                content = msg.get("content", {})
-                if mtype == "stream":
-                    text = content.get("text", "")
-                    if text.startswith("[[EXPORT:CSV]]"):
-                        payload.append(text[len("[[EXPORT:CSV]]"):])
-                        kind = "CSV"
-                    elif text.startswith("[[EXPORT:TEXT]]"):
-                        payload.append(text[len("[[EXPORT:TEXT]]"):])
-                        kind = "TEXT"
-                elif mtype == "status" and content.get("execution_state") == "idle":
-                    break
-        except Exception:
-            pass
-    data = "".join(payload)
-    if not data:
-        return JSONResponse({"error": "no data"}, status_code=500)
-    filename = f"{name}.{ 'csv' if kind=='CSV' else 'txt'}"
+    def _match(msg):
+        mtype = msg.get("header", {}).get("msg_type")
+        content = msg.get("content", {})
+        if mtype == "stream":
+            text = content.get("text", "")
+            if text.startswith("[[EXPORT:CSV]]"):
+                return ("CSV", text[len("[[EXPORT:CSV]]"):])
+            if text.startswith("[[EXPORT:TEXT]]"):
+                return ("TEXT", text[len("[[EXPORT:TEXT]]"):])
+        return None
+
+    res = await _execute_and_collect(code, _match, wait_timeout=export_timeout_seconds())
+    if not res:
+        return json_error("no data", 500)
+    kind, data = res
+    filename = f"{safe_var}.{ 'csv' if kind=='CSV' else 'txt'}"
     media = "text/csv" if kind == "CSV" else "text/plain"
     headers = {"Content-Disposition": f"attachment; filename={filename}"}
     return StreamingResponse(iter([data]), media_type=media, headers=headers)
