@@ -7,3 +7,6 @@ pandas
 matplotlib
 numpy
 scikit-learn
+pyarrow
+openpyxl
+pydantic>=1.10

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +17,13 @@ import time
 from .config import kernel_feature_enabled, auth_required, get_api_token, exec_timeout_seconds, export_max_rows_default
 from .auth import require_auth, require_ws_auth
 from .flows import list_flows, save_flow, load_flow, delete_flow
+from .flow_models import FlowModel
+try:
+    from pydantic import ValidationError  # type: ignore
+except Exception:  # fallback if pydantic v1 already available without import path
+    ValidationError = Exception  # type: ignore
 from .exec_control import exec_registry, enforce_timeout_and_interrupt
+import re
 
 nest_asyncio.apply()
 
@@ -37,6 +43,21 @@ iopub_gate = asyncio.Lock()
 
 # Static frontend dir
 static_dir = Path(__file__).resolve().parent.parent / "frontend"
+root_dir = Path(__file__).resolve().parent.parent
+
+def _uploads_dir() -> Path:
+    d = root_dir / "data" / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+def _safe_filename(name: str) -> str:
+    name = Path(name).name  # strip path
+    if not _SAFE_NAME.match(name):
+        stem = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:120] or "file"
+        ext = ''.join(Path(name).suffixes)
+        return (stem + ext)[:128]
+    return name
 
 @app.get("/")
 async def index():
@@ -179,6 +200,10 @@ async def list_variables(_: bool = Depends(require_auth)):
                     break
         except Exception:
             pass
+    try:
+        await exec_registry.resolve(msg_id)
+    except Exception:
+        pass
     return {"variables": vars_json or []}
 
 @app.get("/health")
@@ -248,6 +273,64 @@ async def bootstrap():
     except subprocess.CalledProcessError as e:
         return JSONResponse({"ok": False, "output": (e.output or "")[-2000:]}, status_code=500)
 
+# ------------------- Uploads API -------------------
+
+@app.get("/api/uploads")
+async def api_list_uploads(_: bool = Depends(require_auth)):
+    d = _uploads_dir()
+    items = []
+    for p in d.iterdir():
+        if p.is_file():
+            try:
+                st = p.stat()
+                items.append({
+                    "name": p.name,
+                    "size": int(st.st_size),
+                    "mtime": int(st.st_mtime),
+                })
+            except Exception:
+                pass
+    items.sort(key=lambda x: x["name"].lower())
+    return {"items": items}
+
+@app.post("/api/uploads")
+async def api_upload_file(file: UploadFile = File(...), _: bool = Depends(require_auth)):
+    try:
+        name = _safe_filename(file.filename or "file")
+        dest = _uploads_dir() / name
+        # stream write
+        with dest.open("wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        abs_path = str(dest.resolve())
+        return {"ok": True, "name": name, "path": abs_path}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/uploads/{name}")
+async def api_get_upload(name: str, _: bool = Depends(require_auth)):
+    safe = _safe_filename(name)
+    p = _uploads_dir() 
+    fp = (p / safe)
+    if not fp.exists() or not fp.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(str(fp))
+
+@app.delete("/api/uploads/{name}")
+async def api_delete_upload(name: str, _: bool = Depends(require_auth)):
+    safe = _safe_filename(name)
+    fp = _uploads_dir() / safe
+    if fp.exists():
+        try:
+            fp.unlink()
+            return {"ok": True}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"error": "not found"}, status_code=404)
+
 @app.websocket("/ws")
 async def ws_stream(ws: WebSocket):
     if not kernel_feature_enabled():
@@ -276,6 +359,14 @@ async def ws_stream(ws: WebSocket):
                 continue
             mtype = msg.get("header", {}).get("msg_type")
             content = msg.get("content", {})
+            # Resolve timeout tracking when we observe idle for a parent msg
+            try:
+                if mtype == "status" and content.get("execution_state") == "idle":
+                    mid = msg.get("parent_header", {}).get("msg_id")
+                    if mid:
+                        await exec_registry.resolve(mid)
+            except Exception:
+                pass
             data = {"type": mtype, "content": content}
             await ws.send_text(json.dumps(data, default=str))
     except WebSocketDisconnect:
@@ -295,7 +386,9 @@ async def api_list_flows(_: bool = Depends(require_auth)):
 async def api_get_flow(name: str, _: bool = Depends(require_auth)):
     try:
         data = load_flow(name)
-        return data
+        # validate and possibly coerce
+        model = FlowModel.parse_obj(data)
+        return model.dict(by_alias=True)
     except FileNotFoundError:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -303,9 +396,11 @@ async def api_get_flow(name: str, _: bool = Depends(require_auth)):
 @app.post("/api/flows/{name}.json")
 async def api_save_flow(name: str, body: dict, _: bool = Depends(require_auth)):
     try:
+        # validate before saving
+        FlowModel.parse_obj(body)
         p = save_flow(name, body)
         return {"ok": True, "path": str(p)}
-    except ValueError as e:
+    except ValidationError as e:  # type: ignore
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

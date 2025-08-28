@@ -35,6 +35,15 @@ let kernelDisabled = false; // backend gated kernel feature
 let authRequired = false; // backend may require token
 let authToken = null; // API token stored in sessionStorage when set
 
+// Keep edges SVG in sync with canvas size using ResizeObserver
+try{
+  const ro = new ResizeObserver(() => {
+    try{ syncEdgesViewport(); drawEdges(); }catch{}
+  });
+  if(canvasWrap) ro.observe(canvasWrap);
+  window.addEventListener('resize', () => { try{ syncEdgesViewport(); drawEdges(); }catch{} });
+}catch{}
+
 // Auth helpers
 function getStoredToken(){ try{ return sessionStorage.getItem('pf_token'); }catch{ return null; } }
 function setStoredToken(tok){ authToken = tok || null; try{ if(authToken) sessionStorage.setItem('pf_token', authToken); else sessionStorage.removeItem('pf_token'); }catch{} }
@@ -49,7 +58,7 @@ let runningLock = false; // 実行中はtrue
 function canRun(){ return !kernelDisabled && ws && ws.readyState===1 && !runningLock; }
 function updateRunButtonsState(){
   const enabled = canRun();
-  const toggle = (btn)=>{ if(!btn) return; btn.disabled = !enabled; btn.classList.toggle('btn-busy', !enabled); };
+    const toggle = (btn) => { if (!btn) return; btn.disabled = !enabled; btn.classList.toggle('btn-busy', !enabled); };
   // グローバル
   toggle(globalRunBtn);
   // ノード
@@ -66,7 +75,7 @@ async function runWithBusy(fn, btn, runningLabel){
     // カーネル未接続や実行中は押せない
     if(!canRun()) { updateRunButtonsState(); return; }
     // 実行開始: Variables更新をidleで一度だけ行うためのフラグ
-    pendingVarsRefresh = true;
+    pendingVarsRefresh = true; 
     runningLock = true; statusEl.textContent='running...'; updateRunButtonsState();
     if(btn && btn.classList.contains('btn-busy') === false){
       const orig = { html: btn.innerHTML, text: btn.textContent };
@@ -90,11 +99,57 @@ function openZoomOverlay(src){
     const img = document.createElement('img'); img.src = src; Object.assign(img.style, { maxWidth:'90%', maxHeight:'90%', boxShadow:'0 10px 30px rgba(0,0,0,0.6)', border:'1px solid #000' });
     ov.appendChild(img);
     const close = ()=>{ ov.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e)=>{ if(e.key==='Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
     ov.addEventListener('click', close);
     document.addEventListener('keydown', onKey);
     document.body.appendChild(ov);
   }catch{}
+}
+
+// Variable preview modal (DataFrame CSV with column filter)
+async function openVarPreview(name){
+  try{
+    const url = `/api/variables/${encodeURIComponent(name)}/export?format=csv`;
+    const res = await apiFetch(url);
+    const text = await res.text();
+    const lines = text.split(/\r?\n/).filter(l=> l.length>0);
+    if(lines.length===0) return;
+    const parseRow = (row)=> row.split(',');
+    const header = parseRow(lines[0]);
+    const rows = lines.slice(1, 201).map(parseRow); // limit to 200 rows
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const modal = document.createElement('div'); modal.className='modal';
+    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(name)} preview</div><span class="chip">${rows.length.toLocaleString()} rows</span>`;
+    const body = document.createElement('div'); body.className='modal-body';
+    const foot = document.createElement('div'); foot.className='modal-foot';
+    const closeBtn = document.createElement('button'); closeBtn.textContent='Close'; closeBtn.className='secondary';
+    const filterInput = document.createElement('input'); filterInput.className='input'; filterInput.placeholder='列名フィルタ（カンマ区切り、空で全列）'; filterInput.style.flex='1';
+    head.appendChild(document.createElement('div')).style.marginLeft='auto';
+    head.appendChild(filterInput);
+    foot.appendChild(closeBtn);
+    modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
+    const renderTable = (cols)=>{
+      const idx = cols && cols.length ? cols.map(c=> header.indexOf(c)).filter(i=> i>=0) : header.map((_,i)=> i);
+      const th = idx.map(i=> `<th style="text-align:left; border-bottom:1px solid #263041; padding:4px 6px;">${escapeHtml(String(header[i]||''))}</th>`).join('');
+      const trs = rows.map(r=> `<tr>${idx.map(i=> `<td style="padding:4px 6px; border-bottom:1px solid #111824;">${escapeHtml(String(r[i]||''))}</td>`).join('')}</tr>`).join('');
+      body.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:600px; border-collapse:collapse; font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
+    };
+    renderTable(null);
+    const applyFilter = ()=>{
+      const raw = String(filterInput.value||'').trim();
+      if(!raw){ renderTable(null); return; }
+      const want = raw.split(',').map(s=> s.trim()).filter(Boolean);
+      renderTable(want);
+    };
+    filterInput.addEventListener('change', applyFilter);
+    filterInput.addEventListener('keyup', (e)=>{ if(e.key==='Enter') applyFilter(); });
+    const close = ()=> overlay.remove();
+    closeBtn.addEventListener('click', close);
+    overlay.addEventListener('click', (e)=>{ if(e.target===overlay) close(); });
+    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
+    document.body.appendChild(overlay);
+    setTimeout(()=> filterInput.focus(), 30);
+  }catch(e){ appendLog('[preview] failed to open'); }
 }
 
 function getPreviewMode(){ return getPreviewModeMod(previewModeEl); }
@@ -115,8 +170,14 @@ const globalRunBtn = document.createElement('button'); globalRunBtn.textContent=
   }, globalRunBtn, 'Running...');
 }); tabsBar.appendChild(globalRunBtn);
 
-function appendLog(x){ log.textContent += x + "\n"; log.scrollTop = log.scrollHeight; }
-function clearLog(){ log.textContent = ''; }
+function appendLog(x, level){
+  const line = document.createElement('div');
+  line.className = 'log-line ' + (level||'info');
+  line.textContent = x;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+function clearLog(){ log.innerHTML = ''; }
 function centerOf(el){ const r = el.getBoundingClientRect(); const p = edgesSvg.getBoundingClientRect(); return { x: r.left - p.left + r.width/2, y: r.top - p.top + r.height/2 }; }
 // View helpers (screen<->world)
 function getScale(){ return state.view?.scale || 1; }
@@ -192,16 +253,16 @@ async function refreshVariables(){
         const dims = (typeof v.rows==='number' && typeof v.cols==='number') ? `<div style="color:var(--sub); font-size:11px; margin-top:4px">${v.rows.toLocaleString()} rows × ${v.cols.toLocaleString()} cols</div>` : '';
         const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
         // wrap DataFrame HTML in a horizontally scrollable container so全列閲覧可
-        return `<tr><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${csvBtn}</td></tr>`;
+        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${csvBtn}</td></tr>`;
       }
       if(tLower==='ndarray'){
         const shp = Array.isArray(v.shape)? `shape=${escapeHtml(String(v.shape))}` : '';
         const val = (v.repr!=null? String(v.repr): '');
         const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
-        return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${csvBtn}</td></tr>`;
+        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${csvBtn}</td></tr>`;
       }
       const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): ''));
-      return `<tr><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`;
+      return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`;
     }).join('');
     // 横スクロールを可能にするため、テーブルのcol幅固定を外し、全体をoverflow:autoで包む
     varsWrap.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:480px; border-collapse:collapse; font-size:12px;"><thead><tr><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">名前</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">型</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">値</th></tr></thead><tbody style="word-break:break-word;">${rows || '<tr><td colspan=\"3\" style=\"padding:6px; color:#9ba3af;\">変数がありません</td></tr>'}</tbody></table></div>`;
@@ -235,6 +296,15 @@ async function refreshVariables(){
           document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
         }catch(e){ appendLog('[export] failed'); }
       });
+    });
+    // Double-click preview for DataFrame
+    varsWrap.querySelectorAll('tr[data-type]').forEach(tr=>{
+      const t = (tr.getAttribute('data-type')||'').toLowerCase();
+      if(t==='dataframe'){
+        tr.addEventListener('dblclick', ()=>{
+          const name = tr.getAttribute('data-var'); if(name) openVarPreview(name);
+        });
+      }
     });
   }catch{
     varsWrap.innerHTML = '<div style="color:#9ba3af">変数の取得に失敗しました</div>';
@@ -337,11 +407,7 @@ function createNodeEl(node){
       document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
       state.pendingSrc = node.id;
       outPort.classList.add('selected');
-      // サジェスト(Quick Add)をポート付近に表示
-      const r = outPort.getBoundingClientRect();
-      const x = Math.round(r.right + 10);
-      const y = Math.round(r.top + r.height/2);
-      try{ openQuickAdd(x, y, node.id); }catch{}
+  // Quick Add は空白クリック時に表示する（ここでは表示しない）
     });
   }
   if(inPort){
@@ -360,13 +426,67 @@ function createNodeEl(node){
     inPort.addEventListener('mouseup', finish);
     inPort.addEventListener('click', finish);
   }
-  // ...existing code...
   return el; }
 
-function renderToolbar(){ toolbarEl.innerHTML = ''; if(!state.activePkg && registry.packages[0]) state.activePkg = registry.packages[0].name; (registry.packages || []).forEach(p=>{ const details = document.createElement('details'); details.className='pkg-section'; details.open = (state.activePkg === p.name); const summary = document.createElement('summary'); summary.textContent = p.label || p.name; Object.assign(summary.style, { cursor:'pointer', userSelect:'none', padding:'8px 10px' }); details.appendChild(summary); const listWrap = document.createElement('div'); listWrap.style.padding='8px 10px'; const list = (registry.byPackage.get(p.name) || []).filter(t=> !(registry.nodes.get(t)?.hidden)); list.forEach(type=>{ const def = registry.nodes.get(type); const btn = document.createElement('button'); btn.textContent = '➕ ' + (def.title || type); btn.dataset.type = type; btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); }); listWrap.appendChild(btn); }); details.appendChild(listWrap); details.addEventListener('toggle', ()=>{ if(details.open){ state.activePkg = p.name; document.querySelectorAll('#toolbar details.pkg-section').forEach(el=>{ if(el!==details) el.open=false; }); } }); toolbarEl.appendChild(details); }); }
+function renderToolbar(){
+  toolbarEl.innerHTML = '';
+  if(!state.activePkg && registry.packages[0]) state.activePkg = registry.packages[0].name;
+  (registry.packages || []).forEach(p=>{
+    const details = document.createElement('details');
+    details.className='pkg-section';
+    details.open = (state.activePkg === p.name);
+    const summary = document.createElement('summary');
+    summary.textContent = p.label || p.name;
+    Object.assign(summary.style, { cursor:'pointer', userSelect:'none', padding:'8px 10px' });
+    details.appendChild(summary);
+
+    // Build category -> [node types] map for this package
+    const types = (registry.byPackage.get(p.name) || []).filter(t=> !(registry.nodes.get(t)?.hidden));
+    const byCat = new Map();
+    for(const t of types){
+      const def = registry.nodes.get(t) || {};
+      const cat = (def.category || 'General');
+      if(!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(t);
+    }
+    // Sort categories: General first, then alphabetically
+    const cats = Array.from(byCat.keys()).sort((a,b)=>{
+      if(a==='General' && b!=='General') return -1; if(b==='General' && a!=='General') return 1; return a.localeCompare(b);
+    });
+
+    // Render each category as its own collapsible section
+    const wrap = document.createElement('div');
+    wrap.style.padding='6px 6px 8px';
+    cats.forEach(cat=>{
+      const catDetails = document.createElement('details');
+      catDetails.className='cat-section';
+      catDetails.open = true;
+      const catSummary = document.createElement('summary');
+      catSummary.textContent = cat;
+      Object.assign(catSummary.style, { cursor:'pointer', userSelect:'none', padding:'6px 8px', fontWeight:'600' });
+      catDetails.appendChild(catSummary);
+      const listWrap = document.createElement('div');
+      listWrap.style.padding='6px 8px';
+      (byCat.get(cat)||[]).forEach(type=>{
+        const def = registry.nodes.get(type) || {};
+        const btn = document.createElement('button');
+        btn.textContent = '➕ ' + (def.title || type);
+        btn.dataset.type = type;
+        btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); });
+        listWrap.appendChild(btn);
+      });
+      catDetails.appendChild(listWrap);
+      wrap.appendChild(catDetails);
+    });
+    details.appendChild(wrap);
+
+    details.addEventListener('toggle', ()=>{ if(details.open){ state.activePkg = p.name; document.querySelectorAll('#toolbar details.pkg-section').forEach(el=>{ if(el!==details) el.open=false; }); } });
+    toolbarEl.appendChild(details);
+  });
+}
 
 function renderSubsystems(){
-  if(!subsystemsEl){ subsystemsEl = document.createElement('div'); subsystemsEl.id='subsystems'; subsystemsEl.style.marginTop = '12px'; toolbarEl.after(subsystemsEl); }
+  if(!subsystemsEl){ subsystemsEl = document.createElement('div'); subsystemsEl.id='subsystems'; subsystemsEl.style.marginTop = '12px'; toolbarEl.appendChild(subsystemsEl); }
   const items = state.groups || [];
   subsystemsEl.innerHTML = `
     <div style="padding:8px 10px; border-top:1px solid #1f2329; font-weight:600;">Subsystems</div>
@@ -389,7 +509,18 @@ function renderSubsystems(){
   });
 }
 
-function ensureGroupsLayer(){ if(!groupsLayer){ groupsLayer = document.createElement('div'); groupsLayer.id='groupsLayer'; groupsLayer.style.position='absolute'; groupsLayer.style.inset='0'; nodesEl.appendChild(groupsLayer); } groupsLayer.innerHTML=''; }
+function ensureGroupsLayer(){
+  if(!groupsLayer){
+    groupsLayer = document.createElement('div');
+    groupsLayer.id='groupsLayer';
+    groupsLayer.style.position='absolute';
+    groupsLayer.style.inset='0';
+  // Important: don't intercept canvas/nodes interactions in empty areas
+  groupsLayer.style.pointerEvents = 'none';
+    nodesEl.appendChild(groupsLayer);
+  }
+  groupsLayer.innerHTML='';
+}
 function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) return; const scale=getScale();
   state.groups.forEach(g=>{
     // 存在しないノードIDを除去（枠は残す）
@@ -408,10 +539,17 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
     }
     const margin=16; const left=(minX-margin), top=(minY-margin), width=(maxX-minX+margin*2), height=(maxY-minY+margin*2);
     g.frame = { x:left, y:top, w:width, h:height };
-    const frame=document.createElement('div'); frame.className='group-frame'; frame.style.left=left+'px'; frame.style.top=top+'px'; frame.style.width=width+'px'; frame.style.height=height+'px';
+  const frame=document.createElement('div');
+  frame.className='group-frame';
+  frame.style.left=left+'px';
+  frame.style.top=top+'px';
+  frame.style.width=width+'px';
+  frame.style.height=height+'px';
+  // Do not intercept events on the frame area itself
+  frame.style.pointerEvents = 'none';
     if(g.collapsed) frame.classList.add('collapsed');
-    const title=document.createElement('div'); title.className='title'; title.textContent=g.name||'Subsystem'; frame.appendChild(title);
-    const actions=document.createElement('div'); actions.className='actions'; actions.innerHTML=`<button class="toggle">${g.collapsed?'Expand':'Collapse'}</button><button class="run">RUN</button><button class="copy">Copy</button><button class="del">Delete</button>`; frame.appendChild(actions);
+  const title=document.createElement('div'); title.className='title'; title.textContent=g.name||'Subsystem'; title.style.pointerEvents='auto'; frame.appendChild(title);
+  const actions=document.createElement('div'); actions.className='actions'; actions.style.pointerEvents='auto'; actions.innerHTML=`<button class="toggle">${g.collapsed?'Expand':'Collapse'}</button><button class="run">RUN</button><button class="copy">Copy</button><button class="del">Delete</button>`; frame.appendChild(actions);
     // タイトルドラッグでグループ移動
     let dragging=false,start=null,starts=null;
     title.addEventListener('mousedown',(e)=>{ if(e.button!==0) return; dragging=true; document.body.style.userSelect='none'; start=screenToWorldPoint(e.clientX,e.clientY); starts=(g.nodeIds||[]).map(id=>{ const n=getNode(id); return {id,x:n?.x||0,y:n?.y||0}; }); e.stopPropagation(); });
@@ -442,13 +580,15 @@ function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendC
 function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n), getUpstreamNode: ()=> upstreamOf(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindFormMod(el, n, refreshForms); } }); }
 
 // WebSocket & streaming
-let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const t = data.content.text || ''; const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ state.stream.currentNodeId = mb[1]; state.preview.head.delete(mb[1]); state.preview.desc.delete(mb[1]); state.preview.headHtml.delete(mb[1]); state.preview.descHtml.delete(mb[1]); state.stream.buffers.set(mb[1], ''); const tgt = document.getElementById('prev-' + mb[1]); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ state.stream.currentNodeId = null; continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue)); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
+let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const streamName = (data.content && data.content.name) ? data.content.name : ''; const t = data.content.text || ''; if(streamName==='stderr'){ t.split(/\r?\n/).forEach(ln=>{ if(ln) appendLog(ln, 'stderr'); }); return; } const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; /* INSERT START: handle [[SKIP:nid]] */ let msK = ln.match(/^\[\[SKIP:([^\]]+)\]\]$/); if(msK){ const nid = msK[1]; const title = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(title){ const old = title.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent='skip'; title.appendChild(chip); } appendLog(`[node ${nid}] unchanged -> skip`); continue; } /* INSERT END */ let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ const nid = mb[1]; state.stream.currentNodeId = nid; state.preview.head.delete(nid); state.preview.desc.delete(nid); state.preview.headHtml.delete(nid); state.preview.descHtml.delete(nid); state.stream.buffers.set(nid, ''); state.stream.timings = state.stream.timings || new Map(); state.stream.timings.set(nid, { start: performance.now() }); const tgt = document.getElementById('prev-' + nid); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ const nid = me[1]; const rec = (state.stream.timings && state.stream.timings.get(nid)) || null; const end = performance.now(); const ms = rec && rec.start ? Math.max(0, Math.round(end - rec.start)) : null; state.stream.currentNodeId = null; if(ms!=null){ const tgt = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(tgt){ const old = tgt.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent = `${ms} ms`; tgt.appendChild(chip); } } continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue), 'error'); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
 
 function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id); }
 
 export async function boot(){
   await loadPackages();
   renderToolbar();
+  // Left pane scroll
+  try{ toolbarEl.style.overflowY='auto'; toolbarEl.style.maxHeight='calc(100vh - 120px)'; }catch{}
   applyViewTransform();
   // try restore
   try { restoreFromLocal(); } catch {}
@@ -559,12 +699,21 @@ export async function boot(){
   }
   ensureWS();
   render();
+  // Ensure edges are drawn after first layout pass
+  try{ requestAnimationFrame(()=>{ try{ syncEdgesViewport(); drawEdges(); }catch{} }); }catch{}
   // 画像クリックで拡大
   document.addEventListener('click', (e)=>{
     const img = e.target && e.target.tagName==='IMG' ? e.target : null;
     if(img && img.closest('.preview')){
       try{ openZoomOverlay(img.src); }catch{}
     }
+  });
+  // 空白クリックでQuick Add（接続モード中）
+  document.addEventListener('pf:openQuickAddAt', (e)=>{
+    try{
+      const d = e.detail || {}; const x = d.x, y = d.y, fromId = d.fromId;
+      if(fromId){ openQuickAdd(x, y, fromId); }
+    }catch{}
   });
   // グループ更新イベントで再描画
   document.addEventListener('pf:groups:changed', ()=>{ try{ renderSubsystems(); renderGroups(); saveToLocal(); }catch{} });
@@ -600,6 +749,15 @@ export async function boot(){
   document.addEventListener('mousedown', (e)=>{
     try{
       if(state.pendingSrc && !e.target.closest('.port') && !e.target.closest('#quickAdd')){
+        // キャンバスの空白をクリックしたら Quick Add をその位置で開く
+        const onCanvas = !!e.target.closest('#canvasWrap');
+        if(onCanvas){
+          const x = e.clientX; const y = e.clientY;
+          try{ openQuickAdd(x, y, state.pendingSrc); }catch{}
+          e.preventDefault();
+          return; // 接続モードは継続
+        }
+        // それ以外（UI等）をクリックしたらキャンセル
         state.pendingSrc = null; clearGhost(); closeQuickAdd(); document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
       }
     }catch{}

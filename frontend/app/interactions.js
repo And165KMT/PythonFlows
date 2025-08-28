@@ -36,6 +36,18 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
   canvasWrap.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if (e.target.closest('.node')) return;
+    // Quick Add: 右側への接続準備中に空白クリックで候補を出す
+    try{
+      if(state.pendingSrc && !e.target.closest('#quickAdd')){
+        const itemsPanel = document.getElementById('quickAdd');
+        if(!itemsPanel){
+          const evt = new CustomEvent('pf:openQuickAddAt', { detail: { x: e.clientX, y: e.clientY, fromId: state.pendingSrc } });
+          document.dispatchEvent(evt);
+          e.preventDefault();
+          return;
+        }
+      }
+    }catch{}
     selecting = true;
     const rect = canvasWrap.getBoundingClientRect();
     selStartScreen = { x: e.clientX, y: e.clientY };
