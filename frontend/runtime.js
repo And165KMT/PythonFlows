@@ -1,5 +1,6 @@
 import { boot } from './app/ui.js';
 import { registry } from './app/nodes.js';
+let __pf_actionsRO = null; // single ResizeObserver for actions area
 
 async function loadAutogen(){
 	try{
@@ -14,14 +15,12 @@ async function loadAutogen(){
 		const js = await res.json();
 		const nodes = Array.isArray(js?.nodes) ? js.nodes : [];
 		if(nodes.length===0) return;
-		// Register a synthetic package name
-		const pkgName = 'autogen';
-		// Ensure package appears in the sidebar
-		if(!registry.packages.some(p=> p.name===pkgName)){
-			registry.packages.push({ name: pkgName, label: 'Autogen', entry: '' });
-		}
-		if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
 		for(const spec of nodes){
+			const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+			if(!registry.packages.some(p=> p.name===pkgName)){
+				registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry: '' });
+			}
+			if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
 			const id = spec.id || `autogen.${Math.random().toString(36).slice(2,8)}`;
 			const def = {
 				id,
@@ -87,5 +86,39 @@ async function loadAutogen(){
 	}catch{}
 }
 
+// Setup viewport CSS variables to avoid cut off and enable vertical scrolling correctly
+// NOTE: --vh must be in px (1% of the innerHeight) so that
+// calc(var(--vh) * 100 - var(--header-h)) == window.innerHeight - header
+function setViewportVars(){
+	try{
+		const vhPx = window.innerHeight * 0.01; // 1vh in px
+		// Store in px, not 'vh'. Using 'vh' here would inflate the height (e.g. 8.5vh * 100 = 850vh)
+		document.documentElement.style.setProperty('--vh', `${vhPx}px`);
+		const header = document.querySelector('header');
+		const h = header ? header.getBoundingClientRect().height : 53;
+		document.documentElement.style.setProperty('--header-h', `${Math.round(h)}px`);
+		// Also update dynamic actions area height used for toolbar bottom padding
+		const actions = document.getElementById('actions');
+		if(actions){
+			const r = actions.getBoundingClientRect();
+			const pad = Math.round(r.height + 12); // small buffer to avoid overlap
+			document.documentElement.style.setProperty('--actions-h', pad + 'px');
+		}
+	}catch{}
+}
+setViewportVars();
+window.addEventListener('resize', setViewportVars);
+window.addEventListener('orientationchange', setViewportVars);
+window.addEventListener('load', setViewportVars);
+
 await loadAutogen();
 boot();
+// Recompute and observe actions height once DOM is ready
+try{
+	setViewportVars();
+	const actions = document.getElementById('actions');
+	if(actions && !__pf_actionsRO){
+		__pf_actionsRO = new ResizeObserver(()=> setViewportVars());
+		__pf_actionsRO.observe(actions);
+	}
+}catch{}

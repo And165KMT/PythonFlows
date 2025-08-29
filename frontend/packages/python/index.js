@@ -31,7 +31,7 @@ export function register(reg){
       const extras = String(node.params?.extras||'').replace(/`/g,'');
       const idx = String(node.params?.indexUrl||'').replace(/`/g,'');
       const up = String(node.params?.upgrade||'false')==='true';
-      const alias = String(node.params?.importAs||'').replace(/`/g,'');
+  const alias = String(node.params?.importAs||'').replace(/`/g,'');
       const setG = String(node.params?.setGlobal||'true')!=='false';
       const requirement = `${pkg}${extras||''}${ver? ('==' + ver): ''}`;
   return [
@@ -55,11 +55,11 @@ except Exception as _e:
 try:
   _mod_name = r'''${pkg}'''.split('[')[0] if r'''${pkg}''' else ''
   _mod = importlib.import_module(_mod_name) if _mod_name else None
-  ${setG ? `globals()[r'''${alias||''}'''] = _mod if r'''${alias||''}''' else globals().setdefault(_mod_name, _mod)` : 'pass'}
+  ${setG ? (alias ? `globals()[r'''${alias}'''] = _mod` : `globals().setdefault(_mod_name, _mod)`) : 'pass'}
   ${v} = _mod
   try:
     _ver = getattr(_mod, '__version__', None)
-    print(f"[import] {alias || '${pkg}'} version: {_ver}")
+    print(f"[import] ${alias ? alias : pkg} version: {_ver}")
   except Exception:
     pass
   # Magic marker to let UI auto-generate nodes for this module

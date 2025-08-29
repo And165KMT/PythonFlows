@@ -62,9 +62,11 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
   });
 
   window.addEventListener('mousemove', (e) => {
-    // ghost edge while connecting
+    // ghost edge while connecting — restrict updates to canvas area to avoid cross-pane interference
     if (state.pendingSrc) {
       try {
+        // Only update while pointer is over the canvas area
+        if (!canvasWrap.contains(e.target)) return;
         const r = edgesSvg.getBoundingClientRect();
         setGhostMod(state, edgesSvg, e.clientX - r.left, e.clientY - r.top);
       } catch {}

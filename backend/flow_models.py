@@ -1,6 +1,10 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, validator
+try:
+    # Use Pydantic v1 compatibility layer if available (on Pydantic v2)
+    from pydantic.v1 import BaseModel, Field, validator  # type: ignore
+except Exception:
+    from pydantic import BaseModel, Field, validator  # type: ignore
 
 
 class NodeModel(BaseModel):

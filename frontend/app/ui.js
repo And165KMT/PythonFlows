@@ -20,9 +20,12 @@ const statusEl = document.getElementById('status');
 const toolbarEl = document.getElementById('toolbar');
 const rightCode = document.getElementById('rightCode');
 const rightVars = document.getElementById('rightVars');
+const rightPkgs = document.getElementById('rightPkgs');
 const tabCode = document.getElementById('tabCode');
 const tabVars = document.getElementById('tabVars');
+const tabPkgs = document.getElementById('tabPkgs');
 const varsWrap = document.getElementById('varsWrap');
+const pkgsWrap = document.getElementById('pkgsWrap');
 const previewModeEl = document.getElementById('previewMode');
 let subsystemsEl; // created when rendering subsystems
 // selection rectangle state
@@ -89,6 +92,35 @@ async function runWithBusy(fn, btn, runningLabel){
   finally{ /* runningLock is released on WS idle */ updateRunButtonsState(); }
     }
   }catch(err){ runningLock = false; updateRunButtonsState(); appendLog('[run] error ' + (err && err.message ? err.message : String(err))); }
+}
+
+// Defensive: fix accidental empty try/except blocks in generated Python
+function sanitizePython(code){
+  try{
+    const lines = String(code||'').split('\n');
+    const needsBlock = (s)=> /^(try:|except\b.*:|else:)$/.test(s.trim());
+    function indentOf(s){ const m = s.match(/^[ \t]*/); return m ? m[0].length : 0; }
+    const out = [];
+    for(let i=0;i<lines.length;i++){
+      const cur = lines[i];
+      out.push(cur);
+      if(needsBlock(cur)){
+        // find next non-empty line
+        let j=i+1; let next=null; while(j<lines.length){ if(lines[j].trim().length){ next=lines[j]; break; } out.push(lines[j]); i=j; j++; }
+        if(next!=null){
+          const a = indentOf(cur);
+          const b = indentOf(next);
+          if(b<=a){ out.push(' '.repeat(a+2) + 'pass'); }
+        } else {
+          // file ended after a try/except/else – add pass
+          const a = indentOf(cur);
+          out.push(' '.repeat(a+2) + 'pass');
+          break;
+        }
+      }
+    }
+    return out.join('\n');
+  }catch{ return code; }
 }
 
 // Sync all visible form inputs into state.node.params (handles focused fields not yet committed)
@@ -174,6 +206,50 @@ async function openVarPreview(name){
   }catch(e){ appendLog('[preview] failed to open'); }
 }
 
+// Generic grid modal for {columns, data}
+function openGridModal(title, columns, rows){
+  try{
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const modal = document.createElement('div'); modal.className='modal';
+    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(title||'')}</div><span class="chip">${(Array.isArray(rows)? rows.length:0).toLocaleString()} rows</span>`;
+    const body = document.createElement('div'); body.className='modal-body';
+    const foot = document.createElement('div'); foot.className='modal-foot';
+    const closeBtn = document.createElement('button'); closeBtn.textContent='Close'; closeBtn.className='secondary'; foot.appendChild(closeBtn);
+    modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
+    const th = (columns||[]).map(c=> `<th style="text-align:left; padding:4px 6px; border-bottom:1px solid #263041">${escapeHtml(String(c))}</th>`).join('');
+    const trs = (rows||[]).map(r=> `<tr>${(columns||[]).map((_,i)=> `<td style="padding:4px 6px; border-bottom:1px solid #111824;">${escapeHtml(String((Array.isArray(r)? r[i] : (r && r[i])) ?? ''))}</td>`).join('')}</tr>`).join('');
+    body.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:560px; border-collapse:collapse; font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
+    const close = ()=> overlay.remove(); closeBtn.addEventListener('click', close); overlay.addEventListener('click', (e)=>{ if(e.target===overlay) close(); });
+    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
+    document.body.appendChild(overlay);
+  }catch{}
+}
+
+function openMessageModal(title, message){
+  try{
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const modal = document.createElement('div'); modal.className='modal';
+    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(title||'')}</div>`;
+    const body = document.createElement('div'); body.className='modal-body'; body.innerHTML = `<pre style="white-space:pre-wrap; margin:0">${escapeHtml(String(message||''))}</pre>`;
+    const foot = document.createElement('div'); foot.className='modal-foot'; const b=document.createElement('button'); b.className='secondary'; b.textContent='Close'; foot.appendChild(b);
+    modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
+    const close=()=> overlay.remove(); b.addEventListener('click', close); overlay.addEventListener('click',(e)=>{ if(e.target===overlay) close(); });
+    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
+    document.body.appendChild(overlay);
+  }catch{}
+}
+
+async function downloadFrom(url, fallbackName){
+  try{
+    const res = await apiFetch(url);
+    if(!res.ok){ try{ const j=await res.json(); appendLog('[download] error '+JSON.stringify(j)); }catch{ appendLog('[download] error '+res.status); } return; }
+    const blob = await res.blob();
+    let name = fallbackName || 'download';
+    try{ const cd = res.headers.get('content-disposition')||''; const m = cd.match(/filename\s*=\s*([^;]+)/i); if(m){ name = m[1].replace(/[\"']/g,'').trim(); } }catch{}
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }catch(e){ appendLog('[download] failed'); }
+}
+
 function getPreviewMode(){ return getPreviewModeMod(previewModeEl); }
 setPreviewModeProvider(getPreviewMode);
 
@@ -181,12 +257,20 @@ const resizer = document.getElementById('rightResizer');
 if(resizer){ let dragging=false, startX=0, startW=0; resizer.addEventListener('mousedown', (e)=>{ dragging=true; startX=e.clientX; const cs = getComputedStyle(document.documentElement); const w = cs.getPropertyValue('--right-w').trim(); startW = parseInt(w||'380') || 380; document.body.style.userSelect='none'; }); window.addEventListener('mouseup', ()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; }); window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx = startX - e.clientX; const newW = Math.max(260, Math.min(900, startW + dx)); document.documentElement.style.setProperty('--right-w', newW + 'px'); syncEdgesViewport(); }); }
 
 // Toolbar top bar with Run All
-const tabsBar = document.createElement('div'); tabsBar.style.display='flex'; tabsBar.style.gap='6px'; tabsBar.style.marginBottom='8px'; toolbarEl.before(tabsBar);
+const sidebarEl = document.getElementById('sidebar');
+const tabsBar = document.createElement('div');
+tabsBar.id = 'runBar';
+tabsBar.style.display='flex';
+tabsBar.style.gap='6px';
+tabsBar.style.margin='8px 0';
+// Prefer placing the run bar at the top of the sidebar; fall back to before(toolbar)
+if(sidebarEl){ sidebarEl.insertBefore(tabsBar, sidebarEl.firstChild || toolbarEl); }
+else { toolbarEl.before(tabsBar); }
 const globalRunBtn = document.createElement('button'); globalRunBtn.textContent='▶ Run All'; Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' }); globalRunBtn.addEventListener('click', async ()=>{
   await runWithBusy(async ()=>{
     ensureWS(); clearLog(); statusEl.textContent='running...';
   syncFormsToState();
-  const code = genCode(); genCodeEl.textContent = code;
+  let code = genCode(); code = sanitizePython(code); genCodeEl.textContent = code;
     const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
     let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec: ' + JSON.stringify(js));
@@ -218,6 +302,32 @@ function refreshSelectionHighlight(){
     if(!id) return;
     if(S.has(id)) el.classList.add('selected'); else el.classList.remove('selected');
   });
+}
+
+// Packages list (right panel)
+async function renderPackagesList(){
+  if(!pkgsWrap) return;
+  try{
+    const pkgs = Array.isArray(registry.packages) ? registry.packages : [];
+    const totalNodes = (name)=> (registry.byPackage.get(name)||[]).length;
+    if(pkgs.length===0){ pkgsWrap.innerHTML = '<div style="color:#9ba3af">パッケージが読み込まれていません</div>'; return; }
+    // まず表の骨格
+    pkgsWrap.innerHTML = `<table style=\"width:100%; border-collapse:collapse; font-size:12px;\"><thead><tr><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Package</th><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Version</th><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Nodes</th></tr></thead><tbody id=\"pkgsTbody\"></tbody></table>`;
+    const tbody = pkgsWrap.querySelector('#pkgsTbody');
+    const names = pkgs.map(p=> p.name);
+    let versions = new Map();
+    try{
+      const res = await apiFetch('/api/modules/versions?names=' + encodeURIComponent(names.join(',')));
+      const js = await res.json().catch(()=>({items:[]}));
+      (Array.isArray(js.items)? js.items: []).forEach(x=> versions.set(x.name, x.version||''));
+    }catch{}
+    const makeRow = (p)=>{
+      const n = totalNodes(p.name);
+      const ver = versions.get(p.name) || '';
+      return `<tr><td style=\"padding:6px 8px; border-bottom:1px solid #111824\">${escapeHtmlUtil(p.label||p.name)}</td><td style=\"padding:6px 8px; border-bottom:1px solid #111824; color:#cbd5e1\">${escapeHtmlUtil(ver||'-')}</td><td style=\"padding:6px 8px; border-bottom:1px solid #111824; color:#9ba3af\">${n} nodes</td></tr>`;
+    };
+    tbody.innerHTML = pkgs.map(makeRow).join('');
+  }catch{ pkgsWrap.innerHTML = '<div style="color:#9ba3af">一覧の描画に失敗しました</div>'; }
 }
 
 // 追加: クリップボード（キャンバス貼り付け用に window にも同期）
@@ -274,21 +384,36 @@ async function refreshVariables(){
       const tLower = String(v.type).toLowerCase();
       if(tLower==='dataframe' && v.html){
         const dims = (typeof v.rows==='number' && typeof v.cols==='number') ? `<div style="color:var(--sub); font-size:11px; margin-top:4px">${v.rows.toLocaleString()} rows × ${v.cols.toLocaleString()} cols</div>` : '';
-        const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
+        const csvBtn = `<button class="btn btn-ghost var-csv" data-var="${name}" title="Download CSV"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m0 0l-3.5-3.5M12 13l3.5-3.5M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Export CSV</button>`;
+        const menuBtn = `<button class="btn btn-icon var-menu var-float-menu" data-var="${name}" data-type="${type}" title="Actions">⋯</button>`;
+        const actions = `<div class="var-actions">${csvBtn}</div>`;
         // wrap DataFrame HTML in a horizontally scrollable container so全列閲覧可
-        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${csvBtn}</td></tr>`;
+        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell"><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${actions}${menuBtn}</div></td></tr>`;
       }
       if(tLower==='ndarray'){
         const shp = Array.isArray(v.shape)? `shape=${escapeHtml(String(v.shape))}` : '';
         const val = (v.repr!=null? String(v.repr): '');
-        const csvBtn = `<button class="var-csv" data-var="${name}" title="Download CSV" style="margin-left:8px; font-size:11px;">CSV</button>`;
-        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${csvBtn}</td></tr>`;
+        const csvBtn = `<button class="btn btn-ghost var-csv" data-var="${name}" title="Download CSV"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m0 0l-3.5-3.5M12 13l3.5-3.5M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Export CSV</button>`;
+        const menuBtn = `<button class="btn btn-icon var-menu var-float-menu" data-var="${name}" data-type="${type}" title="Actions">⋯</button>`;
+        const actions = `<div class="var-actions">${csvBtn}</div>`;
+        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell">${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${actions}${menuBtn}</div></td></tr>`;
       }
       const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): ''));
-      return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td>${escapeHtml(val).slice(0,200)}</td></tr>`;
+      const menuBtn = `<button class="btn btn-icon var-menu var-float-menu" data-var="${name}" data-type="${type}" title="Actions">⋯</button>`;
+      return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell">${escapeHtml(val).slice(0,200)}${menuBtn}</div></td></tr>`;
     }).join('');
     // 横スクロールを可能にするため、テーブルのcol幅固定を外し、全体をoverflow:autoで包む
     varsWrap.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:480px; border-collapse:collapse; font-size:12px;"><thead><tr><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">名前</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">型</th><th style=\"text-align:left; border-bottom:1px solid #263041; padding:4px 6px;\">値</th></tr></thead><tbody style="word-break:break-word;">${rows || '<tr><td colspan=\"3\" style=\"padding:6px; color:#9ba3af;\">変数がありません</td></tr>'}</tbody></table></div>`;
+    // Imports section appended
+    try{
+      const parent = varsWrap.parentElement;
+      if(parent){
+        const old = parent.querySelector('#importsWrap')?.parentElement;
+        if(old) old.remove();
+        const importsBox = await renderImportsList();
+        parent.appendChild(importsBox);
+      }
+    }catch{}
     // Make variables draggable
     varsWrap.querySelectorAll('.var-item').forEach(el=>{
       el.addEventListener('dragstart', (e)=>{
@@ -305,19 +430,22 @@ async function refreshVariables(){
         const name = btn.getAttribute('data-var'); if(!name) return;
         try{
           const url = `/api/variables/${encodeURIComponent(name)}/export?format=csv`;
-          const res2 = await apiFetch(url);
-          const ct = (res2.headers.get('content-type')||'').toLowerCase();
-          if(ct.includes('application/json')){
-            const j = await res2.json().catch(()=>({}));
-            appendLog('[export] error ' + JSON.stringify(j));
-            return;
-          }
-          const blob = await res2.blob();
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = `${name}.csv`;
-          document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+          await downloadFrom(url, `${name}.csv`);
         }catch(e){ appendLog('[export] failed'); }
+      });
+    });
+    // Actions menu buttons
+    varsWrap.querySelectorAll('.var-menu').forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        const name = btn.getAttribute('data-var'); const type = btn.getAttribute('data-type')||'';
+        const r = btn.getBoundingClientRect();
+        openVarActionsMenu(name, type, r.left, r.bottom+2);
+      });
+    });
+    // Row context menu
+    varsWrap.querySelectorAll('tr[data-var]').forEach(tr=>{
+      tr.addEventListener('contextmenu', (e)=>{
+        e.preventDefault(); const name = tr.getAttribute('data-var'); const type = tr.getAttribute('data-type')||''; openVarActionsMenu(name, type, e.clientX, e.clientY);
       });
     });
     // Double-click preview for DataFrame
@@ -334,9 +462,85 @@ async function refreshVariables(){
   }
 }
 
-function activateTab(which){ if(which==='code'){ rightCode.style.display='block'; rightVars.style.display='none'; tabCode?.classList.add('active'); tabVars?.classList.remove('active'); tabCode?.setAttribute('aria-selected','true'); tabVars?.setAttribute('aria-selected','false'); } else { rightCode.style.display='none'; rightVars.style.display='block'; tabVars?.classList.add('active'); tabCode?.classList.remove('active'); tabVars?.setAttribute('aria-selected','true'); tabCode?.setAttribute('aria-selected','false'); refreshVariables(); } }
+async function openVarActionsMenu(name, type, x, y){
+  const tLower = String(type||'').toLowerCase();
+  const items = [];
+  function add(label, fn, disabled){ items.push({ key: label, label, disabled: !!disabled, onClick: fn }); }
+  function sep(){ items.push({ key:'sep'+Math.random(), label:'-', separator:true }); }
+  async function openHead(){ const res = await apiFetch(`/api/variables/${encodeURIComponent(name)}/head?rows=50`); const js = await res.json().catch(()=>({})); if(js && js.columns && js.data){ openGridModal(`${name} • head`, js.columns, js.data); } else openMessageModal('head', JSON.stringify(js)); }
+  async function openTail(){ const r = window.prompt('rows (default 50):','50'); if(r==null) return; const res = await apiFetch(`/api/variables/${encodeURIComponent(name)}/tail?rows=${encodeURIComponent(r)}`); const js = await res.json().catch(()=>({})); if(js && js.columns && js.data){ openGridModal(`${name} • tail`, js.columns, js.data); } else openMessageModal('tail', JSON.stringify(js)); }
+  async function openSample(){ const r = window.prompt('rows (default 50):','50'); if(r==null) return; const res = await apiFetch(`/api/variables/${encodeURIComponent(name)}/sample?rows=${encodeURIComponent(r)}`); const js = await res.json().catch(()=>({})); if(js && js.columns && js.data){ openGridModal(`${name} • sample`, js.columns, js.data); } else openMessageModal('sample', JSON.stringify(js)); }
+  async function openRows(){ const off = window.prompt('offset:','0'); if(off==null) return; const lim = window.prompt('limit:','100'); if(lim==null) return; const res=await apiFetch(`/api/variables/${encodeURIComponent(name)}/rows?offset=${encodeURIComponent(off)}&limit=${encodeURIComponent(lim)}`); const js=await res.json().catch(()=>({})); if(js && js.columns && js.data){ openGridModal(`${name} • rows ${off}-${Number(off)+Number(lim)-1}`, js.columns, js.data); } else openMessageModal('rows', JSON.stringify(js)); }
+  async function openCols(){ const pat = window.prompt('column regex (optional):',''); const url = `/api/variables/${encodeURIComponent(name)}/columns${pat? ('?pattern='+encodeURIComponent(pat)) : ''}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.columns){ const rows = js.columns.map(c=> [c, (js.dtypes && js.dtypes[c]) || '']); openGridModal(`${name} • columns`, ['column','dtype'], rows); } else openMessageModal('columns', JSON.stringify(js)); }
+  async function openDescribe(){ const cols = window.prompt('columns (comma, optional):',''); const url = `/api/variables/${encodeURIComponent(name)}/describe${cols? ('?columns='+encodeURIComponent(cols)) : ''}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.describe){ // flatten describe dict-of-dict
+      const metrics = Object.keys(js.describe||{}); const colSet = new Set(); metrics.forEach(m=> Object.keys(js.describe[m]||{}).forEach(c=> colSet.add(c)));
+      const columns = ['metric', ...Array.from(colSet)]; const rows = metrics.map(m=> [m, ...Array.from(colSet).map(c=> (js.describe[m]&&js.describe[m][c]!=null)? js.describe[m][c] : '')]);
+      openGridModal(`${name} • describe`, columns, rows);
+    } else openMessageModal('describe', JSON.stringify(js)); }
+  async function openCorr(){ const cols = window.prompt('columns (comma, optional):',''); const url = `/api/variables/${encodeURIComponent(name)}/corr${cols? ('?columns='+encodeURIComponent(cols)) : ''}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.matrix){ const columns = js.columns||[]; const rows = (js.matrix||[]).map((r,i)=> [columns[i], ...r]); openGridModal(`${name} • corr`, [''] .concat(columns), rows); } else openMessageModal('corr', JSON.stringify(js)); }
+  async function openVCounts(){ const col = window.prompt('column:'); if(!col) return; const lim = window.prompt('limit:','20'); if(lim==null) return; const url = `/api/variables/${encodeURIComponent(name)}/value_counts?column=${encodeURIComponent(col)}&limit=${encodeURIComponent(lim)}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.items){ openGridModal(`${name} • value_counts(${col})`, ['value','count'], js.items); } else openMessageModal('value_counts', JSON.stringify(js)); }
+  async function openUnique(){ const col = window.prompt('column:'); if(!col) return; const lim = window.prompt('limit:','100'); if(lim==null) return; const url = `/api/variables/${encodeURIComponent(name)}/unique?column=${encodeURIComponent(col)}&limit=${encodeURIComponent(lim)}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.values){ openGridModal(`${name} • unique(${col})`, ['value'], js.values.map(v=> [v])); } else openMessageModal('unique', JSON.stringify(js)); }
+  async function openHist(){ const col = window.prompt('numeric column:'); if(!col) return; const bins = window.prompt('bins:','20'); if(bins==null) return; const url = `/api/variables/${encodeURIComponent(name)}/histogram?column=${encodeURIComponent(col)}&bins=${encodeURIComponent(bins)}`; const js = await (await apiFetch(url)).json().catch(()=>({})); if(js && js.counts && js.edges){ const cols=['bin_from','bin_to','count']; const rows=[]; for(let i=0;i<js.counts.length;i++){ rows.push([js.edges[i], js.edges[i+1], js.counts[i]]); } openGridModal(`${name} • hist(${col})`, cols, rows); } else openMessageModal('hist', JSON.stringify(js)); }
+  async function openFilter(){ try{ const tmpl = '{"filters":[{"column":"species","op":"eq","value":"setosa"}],"limit":50,"sort_by":"","descending":false}'; const raw = window.prompt('Filter JSON (example shown):', tmpl); if(!raw) return; const body = JSON.parse(raw); const res = await apiFetch(`/api/variables/${encodeURIComponent(name)}/filter`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const js = await res.json().catch(()=>({})); if(js && js.columns && js.data){ openGridModal(`${name} • filter`, js.columns, js.data); } else openMessageModal('filter', JSON.stringify(js)); }catch(e){ openMessageModal('filter', 'invalid JSON'); } }
+  async function doExport(fmt){ const ext = (fmt==='jsonl')? 'jsonl' : (fmt==='pickle')? 'pkl' : fmt; await downloadFrom(`/api/variables/${encodeURIComponent(name)}/export?format=${encodeURIComponent(fmt)}`, `${name}.${ext}`); }
+  async function doRename(){ const to = window.prompt('new variable name:'); if(!to) return; const js = await (await apiFetch(`/api/variables/${encodeURIComponent(name)}/rename`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ to }) })).json().catch(()=>({})); if(js && js.ok){ appendLog(`[var] renamed to ${to}`); refreshVariables(); } else openMessageModal('rename', JSON.stringify(js)); }
+  async function doDelete(){ if(!window.confirm(`Delete variable ${name}?`)) return; const js = await (await apiFetch(`/api/variables/${encodeURIComponent(name)}`, { method:'DELETE' })).json().catch(()=>({})); if(js && js.ok){ appendLog(`[var] deleted ${name}`); refreshVariables(); } else openMessageModal('delete', JSON.stringify(js)); }
+  // DataFrame-rich items
+  if(tLower==='dataframe'){
+    add('Head', openHead); add('Tail…', openTail); add('Sample…', openSample); add('Rows (paging)…', openRows); sep(); add('Columns…', openCols); add('Describe…', openDescribe); add('Correlation…', openCorr); sep(); add('Value Counts…', openVCounts); add('Unique…', openUnique); add('Histogram…', openHist); add('Filter (JSON)…', openFilter); sep();
+  } else {
+    // generic preview
+    add('Head', openHead);
+  }
+  // Detect JSON/XML capabilities dynamically for non-DataFrame
+  const addJsonXml = async ()=>{
+    try{
+      const js = await (await apiFetch(`/api/variables/${encodeURIComponent(name)}/detect_format`)).json().catch(()=>({}));
+      if(js && js.format==='json'){
+        add('JSON Preview…', async ()=>{ const path = window.prompt('path (e.g., a.b[0])',''); const url = `/api/variables/${encodeURIComponent(name)}/json/preview${path? ('?path='+encodeURIComponent(path)) : ''}`; const r = await (await apiFetch(url)).json().catch(()=>({})); if(r && r.columns && r.data){ openGridModal(`${name} • json preview`, r.columns, r.data); } else openMessageModal('json preview', JSON.stringify(r)); });
+        add('JSON Schema…', async ()=>{ const path = window.prompt('path (optional)',''); const url = `/api/variables/${encodeURIComponent(name)}/json/schema${path? ('?path='+encodeURIComponent(path)) : ''}`; const r = await (await apiFetch(url)).json().catch(()=>({})); openMessageModal('json schema', JSON.stringify(r, null, 2)); });
+      } else if(js && js.format==='xml'){
+        add('XML Preview…', async ()=>{ const xp = window.prompt('xpath (e.g., .//item)', './/'); const url = `/api/variables/${encodeURIComponent(name)}/xml/preview${xp? ('?xpath='+encodeURIComponent(xp)) : ''}`; const r = await (await apiFetch(url)).json().catch(()=>({})); if(r && r.columns && r.data){ openGridModal(`${name} • xml preview`, r.columns, r.data); } else openMessageModal('xml preview', JSON.stringify(r)); });
+        add('XML Tags…', async ()=>{ const r = await (await apiFetch(`/api/variables/${encodeURIComponent(name)}/xml/tags`)).json().catch(()=>({})); if(r && r.tags){ openGridModal(`${name} • xml tags`, ['tag','count'], r.tags); } else openMessageModal('xml tags', JSON.stringify(r)); });
+      }
+    }catch{}
+    // open after async population
+    openContextMenu(items, x, y);
+  };
+  // Common actions
+  sep();
+  const exportSubmenu = [
+    { key:'csv', label:'CSV', onClick: ()=> doExport('csv') },
+    { key:'json', label:'JSON', onClick: ()=> doExport('json') },
+    { key:'jsonl', label:'JSON Lines', onClick: ()=> doExport('jsonl') },
+    { key:'parquet', label:'Parquet', onClick: ()=> doExport('parquet') },
+    { key:'pickle', label:'Pickle', onClick: ()=> doExport('pickle') },
+    { key:'npy', label:'NumPy .npy', onClick: ()=> doExport('npy') },
+  ];
+  items.push({ key:'export', label:'Export ▸', children: exportSubmenu });
+  add('Rename…', doRename); add('Delete…', doDelete);
+  // If not dataframe, detect json/xml asynchronously; otherwise just open now
+  if(tLower!=='dataframe') await addJsonXml(); else openContextMenu(items, x, y);
+}
+
+function activateTab(which){
+  // reset
+  rightCode.style.display='none'; rightVars.style.display='none'; rightPkgs && (rightPkgs.style.display='none');
+  // ensure scrollability – guard against stale CSS
+  [rightCode, rightVars, rightPkgs].forEach(el=>{ if(el){ el.style.overflow='auto'; el.style.minHeight='0'; } });
+  tabCode?.classList.remove('active'); tabVars?.classList.remove('active'); tabPkgs?.classList.remove('active');
+  tabCode?.setAttribute('aria-selected','false'); tabVars?.setAttribute('aria-selected','false'); tabPkgs?.setAttribute('aria-selected','false');
+  if(which==='code'){
+    rightCode.style.display='block'; tabCode?.classList.add('active'); tabCode?.setAttribute('aria-selected','true');
+  } else if(which==='vars'){
+    rightVars.style.display='block'; tabVars?.classList.add('active'); tabVars?.setAttribute('aria-selected','true'); refreshVariables();
+  } else {
+    rightPkgs && (rightPkgs.style.display='block'); tabPkgs?.classList.add('active'); tabPkgs?.setAttribute('aria-selected','true'); renderPackagesList();
+  }
+}
 tabCode?.addEventListener('click', ()=> activateTab('code'));
 tabVars?.addEventListener('click', ()=> activateTab('vars'));
+tabPkgs?.addEventListener('click', ()=> activateTab('pkgs'));
 previewModeEl?.addEventListener('change', ()=>{ render(); const figs = state.nodes.filter(isFigureNode); if(figs.length){ state.lastPlotNodeId = figs[figs.length-1].id; } });
 
 function syncEdgesViewport(){ syncEdgesViewportMod(canvasWrap, edgesSvg); }
@@ -392,7 +596,7 @@ function createNodeEl(node){
         await runWithBusy(async()=>{
           ensureWS(); statusEl.textContent='running...';
           syncFormsToState();
-          const code = genCodeUpTo(node.id); genCodeEl.textContent = code;
+          let code = genCodeUpTo(node.id); code = sanitizePython(code); genCodeEl.textContent = code;
           const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
           let js={}; try{ js=await res.json(); }catch{}
           appendLog('Sent exec (node '+node.id+'): ' + JSON.stringify(js));
@@ -495,6 +699,8 @@ function renderToolbar(){
         const def = registry.nodes.get(type) || {};
         const btn = document.createElement('button');
         btn.textContent = '➕ ' + (def.title || type);
+        btn.style.width = '100%';
+        btn.style.marginBottom = '6px';
         btn.dataset.type = type;
         btn.addEventListener('click', ()=>{ addNode(type, 80+Math.random()*200, 80+Math.random()*200); render(); });
         listWrap.appendChild(btn);
@@ -523,7 +729,7 @@ function renderSubsystems(){
       await runWithBusy(async ()=>{
         ensureWS(); statusEl.textContent='running...';
   syncFormsToState();
-  const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code;
+  let code = genCodeForNodes(g.nodeIds, true); code = sanitizePython(code); genCodeEl.textContent = code;
   const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
   appendLog('Sent exec (group): ' + JSON.stringify(js));
       }, btn, 'Running...');
@@ -586,7 +792,7 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
     actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
     actions.querySelector('.run').addEventListener('click', async (e)=>{
       e.stopPropagation(); await runWithBusy(async ()=>{
-  ensureWS(); statusEl.textContent='running...'; syncFormsToState(); const code = genCodeForNodes(g.nodeIds, true); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
+  ensureWS(); statusEl.textContent='running...'; syncFormsToState(); let code = genCodeForNodes(g.nodeIds, true); code = sanitizePython(code); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
       }, actions.querySelector('.run'));
     });
     actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
@@ -614,19 +820,17 @@ let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readySt
             const res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(mod));
             const js = await res.json().catch(()=>({}));
             const arr = Array.isArray(js.nodes) ? js.nodes : [];
-            if(arr.length){
-              if(!registry.byPackage.has('autogen')) registry.byPackage.set('autogen', []);
-              if(!registry.packages.some(p=> p.name==='autogen')) registry.packages.push({ name:'autogen', label:'Autogen', entry:'' });
+    if(arr.length){
               for(const spec of arr){
                 const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
                 if(registry.nodes.has(id)) continue;
                 const def = {
                   id,
                   title: spec.title || id,
-                  category: spec.category || 'Auto',
+      category: spec.category || 'Auto',
                   inputType: spec.inputType || 'Any',
                   outputType: spec.outputType || 'Any',
-                  defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
+      defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
                   form(node){
                     const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
                     const fields = (spec.params||[]).filter(p=> !p.hidden);
@@ -636,28 +840,67 @@ let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readySt
                     const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
                     return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
                   },
-                  code(node){
+                  code(node, ctx){
                     const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
                     const p = node.params||{};
+                    const call = spec.call || {};
                     const params = (spec.params||[])
                       .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
                       .filter(x=> p[x.name]!==undefined)
                       .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
                       .join(', ');
-                    const target = spec.call?.target || '';
+                    const target = call.target || '';
                     const parts = target.split('.');
                     const root = parts[0] || '';
                     const modPath = parts.slice(0, -1).join('.');
                     const seg = [];
-                    if(root){ seg.push(`import ${root}`); }
+                    if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
                     if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
-                    seg.push(`${v} = ${target}(${params})`);
+                    const src = (ctx && typeof ctx.srcVar==='function') ? ctx.srcVar(node) : null;
+                    const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : (src? [src]: []);
+                    const dfParam = call.dfParam || null;
+                    if(call.kind==='function'){
+                      if(dfParam && src){
+                        const argz = [];
+                        argz.push(`${dfParam}=${src}`);
+                        if(params) argz.push(params);
+                        seg.push(`${v} = ${target}(${argz.join(', ')})`);
+                      } else {
+                        seg.push(`${v} = ${target}(${params})`);
+                      }
+                    } else if(call.kind==='constructor'){
+                      seg.push(`${v} = ${target}(${params})`);
+                    } else if(call.kind==='method'){
+                      // prefer first upstream as receiver (estimator), last as data
+                      let recv = srcs[0] || src;
+                      const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
+                      if(!recv && call.receiver && call.receiver!=='estimator'){
+                        recv = `globals().get('${call.receiver}', None)`;
+                      }
+                      const meth = target.split('.').slice(-1)[0];
+                      if(recv){
+                        const argz = [];
+                        if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
+                        if(params) argz.push(params);
+                        const joined = argz.join(', ');
+                        if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
+                        else seg.push(`${v} = ${recv}.${meth}(${joined})`);
+                        if(call.returnsSelf) seg.push(`${v} = ${recv}`);
+                      } else {
+                        seg.push(`${v} = ${target}(${params})`);
+                      }
+                    } else {
+                      seg.push(`${v} = ${target}(${params})`);
+                    }
                     seg.push(`print(${v})`);
                     return seg;
                   }
                 };
                 registry.nodes.set(id, def);
-                registry.byPackage.get('autogen').push(id);
+                const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+                if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+                if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+                registry.byPackage.get(pkgName).push(id);
               }
               renderToolbar();
               appendLog(`[autogen] ${arr.length} node(s) from ${mod}`);
@@ -676,9 +919,45 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
 export async function boot(){
   await loadPackages();
   renderToolbar();
-  // Left pane scroll
-  try{ toolbarEl.style.overflowY='auto'; toolbarEl.style.maxHeight='calc(100vh - 120px)'; }catch{}
+  try{ renderPackagesList(); }catch{}
+  // Left pane uses sidebar scroll; no explicit maxHeight on toolbar
   applyViewTransform();
+  // Ensure right panel can scroll even if stale CSS is cached
+  [rightCode, rightVars, rightPkgs].forEach(el=>{ if(el){ el.style.overflow='auto'; el.style.minHeight='0'; } });
+  // Ensure code block scrolls
+  try{ if(genCodeEl){ genCodeEl.style.overflow='auto'; genCodeEl.style.minHeight='0'; } }catch{}
+  // Ensure run bar exists (rare cases where DOM was reflowed before creation)
+  try{ if(!document.getElementById('runBar')){ const rb = document.createElement('div'); rb.id='runBar'; rb.style.display='flex'; rb.style.gap='6px'; rb.style.margin='8px 0'; if(sidebarEl){ sidebarEl.insertBefore(rb, sidebarEl.firstChild || toolbarEl); } else { toolbarEl.before(rb); } rb.appendChild(globalRunBtn); } }catch{}
+
+  // Ensure left-bottom actions area exists (Install/Restart/Sample)
+  try{
+    let actionsEl = document.getElementById('actions');
+    const sidebar = document.getElementById('sidebar');
+    if(!actionsEl){
+      actionsEl = document.createElement('div');
+      actionsEl.id = 'actions';
+      actionsEl.style.display = 'flex';
+      actionsEl.style.gap = '8px';
+      actionsEl.style.marginTop = '12px';
+      actionsEl.style.flexWrap = 'wrap';
+      actionsEl.style.position = 'sticky';
+      actionsEl.style.bottom = '0';
+      actionsEl.style.left = '0'; actionsEl.style.right = '0';
+      actionsEl.style.background = 'var(--panel)';
+      actionsEl.style.padding = '8px 0';
+      actionsEl.style.borderTop = '1px solid #1f2329';
+      actionsEl.style.zIndex = '5';
+      if(sidebar) sidebar.appendChild(actionsEl);
+    }
+    const ensureBtn = (id, text, cls)=>{
+      let b = document.getElementById(id);
+      if(!b){ b = document.createElement('button'); b.id=id; b.textContent=text; if(cls) b.className = cls; actionsEl.appendChild(b); }
+      return b;
+    };
+    ensureBtn('installBtn', 'Install / Check', 'warn');
+    ensureBtn('restartBtn', 'Restart Kernel', 'secondary');
+    ensureBtn('sampleBtn', 'Sample', 'secondary');
+  }catch{}
   // try restore
   try { restoreFromLocal(); } catch {}
 
@@ -733,9 +1012,7 @@ export async function boot(){
       const js = await res.json().catch(()=>({}));
       const arr = Array.isArray(js.nodes) ? js.nodes : [];
       if(!arr.length){ appendLog('[introspect] no spec'); return; }
-      if(!registry.byPackage.has('autogen')) registry.byPackage.set('autogen', []);
-      if(!registry.packages.some(p=> p.name==='autogen')) registry.packages.push({ name:'autogen', label:'Autogen', entry:'' });
-      for(const spec of arr){
+  for(const spec of arr){
         const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
         const def = {
           id,
@@ -753,31 +1030,70 @@ export async function boot(){
             const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
             return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
           },
-          code(node){
+          code(node, ctx){
             const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
             const p = node.params||{};
+            const call = spec.call || {};
             const params = (spec.params||[])
               .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
               .filter(x=> p[x.name]!==undefined)
               .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
               .join(', ');
-            const target = spec.call?.target || '';
+            const target = call.target || '';
             const parts = target.split('.');
             const root = parts[0] || '';
             const modPath = parts.slice(0, -1).join('.');
             const seg = [];
-            if(root){ seg.push(`import ${root}`); }
+            if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
             if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
-            seg.push(`${v} = ${target}(${params})`);
+            const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : [];
+            const src = srcs[0] || null;
+            const dfParam = call.dfParam || null;
+            if(call.kind==='function'){
+              if(dfParam && src){
+                const argz = [];
+                argz.push(`${dfParam}=${src}`);
+                if(params) argz.push(params);
+                seg.push(`${v} = ${target}(${argz.join(', ')})`);
+              } else {
+                seg.push(`${v} = ${target}(${params})`);
+              }
+            } else if(call.kind==='constructor'){
+              seg.push(`${v} = ${target}(${params})`);
+            } else if(call.kind==='method'){
+              let recv = srcs[0] || src;
+              const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
+              if(!recv && call.receiver && call.receiver!=='estimator'){
+                recv = `globals().get('${call.receiver}', None)`;
+              }
+              const meth = target.split('.').slice(-1)[0];
+              if(recv){
+                const argz = [];
+                if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
+                if(params) argz.push(params);
+                const joined = argz.join(', ');
+                if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
+                else seg.push(`${v} = ${recv}.${meth}(${joined})`);
+                if(call.returnsSelf) seg.push(`${v} = ${recv}`);
+              } else {
+                seg.push(`${v} = ${target}(${params})`);
+              }
+            } else {
+              seg.push(`${v} = ${target}(${params})`);
+            }
             seg.push(`print(${v})`);
             return seg;
           }
         };
         registry.nodes.set(id, def);
-        registry.byPackage.get('autogen').push(id);
+  const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+  if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+  if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+  registry.byPackage.get(pkgName).push(id);
       }
-      renderToolbar();
-      appendLog('[introspect] added ' + arr.length + ' node(s) to Autogen');
+  renderToolbar();
+  try{ renderPackagesList(); }catch{}
+  appendLog('[introspect] added ' + arr.length + ' node(s) to Autogen');
     }catch(e){ appendLog('[introspect] failed'); }
   });
 
@@ -924,4 +1240,32 @@ export async function boot(){
     drawEdges,
     saveToLocal
   });
+}
+
+// Imports list (Variables panel)
+async function renderImportsList(){
+  const box = document.createElement('div'); box.style.marginTop='8px';
+  box.innerHTML = `<div style="padding:6px 8px; font-weight:600; border-top:1px solid #1f2329;">Imports</div><div id="importsWrap" style="padding:8px 10px; font-size:12px; color:#cbd5e1"></div>`;
+  const wrap = box.querySelector('#importsWrap');
+  try{
+    const res = await apiFetch('/api/imports');
+    const js = await res.json().catch(()=>({items:[]}));
+    const items = Array.isArray(js.items)? js.items: [];
+    if(!items.length){ wrap.innerHTML = '<div style="color:#9ba3af">（インポートなし）</div>'; }
+    else {
+      wrap.innerHTML = items.map(it=> `<div class="imp-item" draggable="true" data-name="${escapeHtml(it.name)}" data-alias="${escapeHtml(it.alias||'')}"><span style="min-width:180px">${escapeHtml(it.name)}</span><span style="color:#9ba3af">as ${escapeHtml(it.alias||'')}</span><span class="chip">${escapeHtml(it.version||'-')}</span></div>`).join('');
+      wrap.querySelectorAll('.imp-item').forEach(el=>{
+        el.addEventListener('dragstart', (e)=>{
+          const name = el.getAttribute('data-name')||'';
+          const alias = el.getAttribute('data-alias')||'';
+          const text = alias || name;
+          try{ e.dataTransfer.setData('text/plain', text); }catch{}
+          e.dataTransfer.effectAllowed = 'copy';
+          el.classList.add('dragging');
+        });
+        el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
+      });
+    }
+  }catch{ wrap.innerHTML = '<div style="color:#9ba3af">取得失敗</div>'; }
+  return box;
 }

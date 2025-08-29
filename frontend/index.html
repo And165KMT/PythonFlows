@@ -1,7 +1,8 @@
-<!doctype html>
+ほんのｓ<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PythonFlows</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -11,14 +12,16 @@
     <div style="margin-left:auto; color:var(--sub); font-size:12px">Drag nodes, connect, then Run. Images appear in Plot node.</div>
   </header>
   <div id="app">
-    <aside id="sidebar">
-      <div id="toolbar"></div>
+    <div id="leftCol">
+      <aside id="sidebar">
+        <div id="toolbar"></div>
+      </aside>
       <div id="actions">
         <button id="installBtn" class="warn">Install / Check</button>
         <button id="restartBtn" class="secondary">Restart Kernel</button>
         <button id="sampleBtn" class="secondary">Sample</button>
       </div>
-    </aside>
+    </div>
     <section id="canvasWrap">
       <svg id="edges"></svg>
       <div id="nodes"></div>
@@ -29,6 +32,7 @@
         <div id="rightTabs" class="tabs" role="tablist" aria-label="Right Panel Tabs">
           <button id="tabCode" class="tab active" role="tab" aria-selected="true" aria-controls="rightCode">Code</button>
           <button id="tabVars" class="tab" role="tab" aria-selected="false" aria-controls="rightVars">Variables</button>
+          <button id="tabPkgs" class="tab" role="tab" aria-selected="false" aria-controls="rightPkgs">Packages</button>
         </div>
         <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
           <label for="previewMode" style="font-size:12px; color:var(--sub)">Preview</label>
@@ -51,6 +55,13 @@
           <span style="font-size:12px; color:#9ba3af;">変数名をドラッグ＆ドロップでノードの入力に上書き</span>
         </div>
   <div id="varsWrap" style="padding:10px"></div>
+      </div>
+      <div id="rightPkgs" style="display:none; height:100%; overflow:auto;">
+        <div style="padding:10px; border-bottom:1px solid #1f2329; font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span>Available Packages</span>
+          <span style="font-size:12px; color:#9ba3af;">ロード済みのノードパッケージ一覧</span>
+        </div>
+        <div id="pkgsWrap" style="padding:10px"></div>
       </div>
     </aside>
   </div>

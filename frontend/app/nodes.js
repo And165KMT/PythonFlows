@@ -280,8 +280,19 @@ export function setPreviewModeProvider(fn){ if(typeof fn==='function') previewMo
 export function genCode(){
   const pmode = previewModeProvider();
   const order = topoSort();
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")',
+  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
     '# --- FlowPython helpers (shared) ---',
+    '__pf_imports = globals().get("__pf_imports", {})',
+    'def _fp_register_import(mod, alias=None):',
+    '    _im = importlib',
+    '    try:',
+    '        m = _im.import_module(mod)',
+    "        ver = getattr(m, '__version__', None)",
+    '    except Exception:',
+    '        ver = None',
+    '    d = globals().get("__pf_imports", {})',
+    '    d[str(mod)] = {"alias": alias, "version": (str(ver) if ver is not None else None)}',
+    '    globals()["__pf_imports"] = d',
     'def _fp_env():',
     "    _safe_builtins = {'abs': abs, 'round': round, 'min': min, 'max': max, 'pow': pow}",
     "    return {'__builtins__': _safe_builtins, 'math': __import__('math'), 'PI': __import__('math').pi}",
@@ -349,15 +360,9 @@ export function genCode(){
     '    except Exception:',
     '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
     '',
-    'try:',
-    '    __pf_hash',
-    'except NameError:',
-    '    __pf_hash = {}',
+  '__pf_hash = globals().get("__pf_hash", {})',
     'def _fp_should_run(nid, h):',
-    '    try:',
-    '        d = __pf_hash',
-    '    except NameError:',
-    '        d = {}',
+  '    d = globals().get("__pf_hash", {})',
     '    prev = d.get(nid)',
     '    if prev == h:',
     '        print(f"[[SKIP:{nid}]]")',
@@ -366,14 +371,14 @@ export function genCode(){
     '    globals()["__pf_hash"] = d',
     '    return True'
   ];
-  const lines = [...header]; const varOf = {}; const ctx = {
+  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
      const allowPreview = (pmode==='all');
      if(allowPreview){
        lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -396,8 +401,19 @@ export function genCodeForNodes(ids, includeUpstream=true){
   } else {
     targets.forEach(id=> keep.add(id));
   }
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")',
+  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
     '# --- FlowPython helpers (shared) ---',
+    '__pf_imports = globals().get("__pf_imports", {})',
+    'def _fp_register_import(mod, alias=None):',
+    '    _im = importlib',
+    '    try:',
+    '        m = _im.import_module(mod)',
+    "        ver = getattr(m, '__version__', None)",
+    '    except Exception:',
+    '        ver = None',
+    '    d = globals().get("__pf_imports", {})',
+    '    d[str(mod)] = {"alias": alias, "version": (str(ver) if ver is not None else None)}',
+    '    globals()["__pf_imports"] = d',
     'def _fp_env():',
     "    _safe_builtins = {'abs': abs, 'round': round, 'min': min, 'max': max, 'pow': pow}",
     "    return {'__builtins__': _safe_builtins, 'math': __import__('math'), 'PI': __import__('math').pi}",
@@ -465,15 +481,9 @@ export function genCodeForNodes(ids, includeUpstream=true){
     '    except Exception:',
   '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
   '',
-  'try:',
-  '    __pf_hash',
-  'except NameError:',
-  '    __pf_hash = {}',
+  '__pf_hash = globals().get("__pf_hash", {})',
   'def _fp_should_run(nid, h):',
-  '    try:',
-  '        d = __pf_hash',
-  '    except NameError:',
-  '        d = {}',
+  '    d = globals().get("__pf_hash", {})',
   '    prev = d.get(nid)',
   '    if prev == h:',
   '        print(f"[[SKIP:{nid}]]")',
@@ -482,14 +492,14 @@ export function genCodeForNodes(ids, includeUpstream=true){
   '    globals()["__pf_hash"] = d',
   '    return True'
   ];
-  const lines = [...header]; const varOf = {}; const ctx = {
+  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -501,8 +511,19 @@ export function genCodeForNodes(ids, includeUpstream=true){
 export function genCodeUpTo(targetId){
   const pmode = previewModeProvider();
   const order = topoSort(); const keep = new Set(); const backAdj = {}; state.edges.forEach(e=>{ (backAdj[e.to] ||= []).push(e.from); }); const stack = [targetId]; while(stack.length){ const u = stack.pop(); if(!u || keep.has(u)) continue; keep.add(u); (backAdj[u]||[]).forEach(v=> stack.push(v)); }
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'plt.close("all")',
+  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
     '# --- FlowPython helpers (shared) ---',
+    '__pf_imports = globals().get("__pf_imports", {})',
+    'def _fp_register_import(mod, alias=None):',
+    '    _im = importlib',
+    '    try:',
+    '        m = _im.import_module(mod)',
+    "        ver = getattr(m, '__version__', None)",
+    '    except Exception:',
+    '        ver = None',
+    '    d = globals().get("__pf_imports", {})',
+    '    d[str(mod)] = {"alias": alias, "version": (str(ver) if ver is not None else None)}',
+    '    globals()["__pf_imports"] = d',
     'def _fp_env():',
     "    _safe_builtins = {'abs': abs, 'round': round, 'min': min, 'max': max, 'pow': pow}",
     "    return {'__builtins__': _safe_builtins, 'math': __import__('math'), 'PI': __import__('math').pi}",
@@ -515,7 +536,7 @@ export function genCodeUpTo(targetId){
     '        env.update(globals())',
     '        if local: env.update(local)',
     "        def _rep(m): return str(env.get(m.group(1), ''))",
-    "        return re.sub(r'\\$\\{([A-Za-z_][A-ZaZ0-9_]*)\\}', _rep, s)",
+  "        return re.sub(r'\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}', _rep, s)",
     '    except Exception:',
     '        return str(text)',
     '',
@@ -570,15 +591,9 @@ export function genCodeUpTo(targetId){
     '    except Exception:',
   '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
   '',
-  'try:',
-  '    __pf_hash',
-  'except NameError:',
-  '    __pf_hash = {}',
+  '__pf_hash = globals().get("__pf_hash", {})',
   'def _fp_should_run(nid, h):',
-  '    try:',
-  '        d = __pf_hash',
-  '    except NameError:',
-  '        d = {}',
+  '    d = globals().get("__pf_hash", {})',
   '    prev = d.get(nid)',
   '    if prev == h:',
   '        print(f"[[SKIP:{nid}]]")',
@@ -587,14 +602,14 @@ export function genCodeUpTo(targetId){
   '    globals()["__pf_hash"] = d',
   '    return True'
   ];
-  const lines = [...header]; const varOf = {}; const ctx = {
+  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
