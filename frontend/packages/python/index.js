@@ -3,7 +3,7 @@
 export function register(reg){
   // --- ListCreate: simple DataFrame source from a comma-separated list ---
   reg.node({
-    id: 'python.ListCreate', title: 'ListCreate', category: 'Sources',
+    id: 'python.ListCreate', title: 'ListCreate',
     inputType: 'None',
     outputType: 'DataFrame',
     defaultParams: { values: '1,2,3', column: 'value', as: 'number' },
@@ -53,7 +53,7 @@ export function register(reg){
   });
   // --- Globals: Set multiple kernel-level variables ---
   reg.node({
-    id: 'python.SetGlobal', title: 'SetGlobal', category: 'Globals',
+    id: 'python.SetGlobal', title: 'SetGlobal',
   inputType: 'Any',
   outputType: 'Any',
     defaultParams: { name: 'alpha', value: '1' },
@@ -80,7 +80,7 @@ export function register(reg){
 
   // --- Math: evaluate expression and store into a new column ---
   reg.node({
-    id: 'python.Math', title: 'Math', category: 'Transform',
+    id: 'python.Math', title: 'Math',
   inputType: 'DataFrame|Any',
   outputType: 'DataFrame|Any',
   defaultParams: { input: '', op: 'mul', value: '2', out: 'result' },
@@ -172,7 +172,7 @@ else:
 
   // --- GetGlobal: fetch an existing global variable into a 1-row DataFrame ---
   reg.node({
-    id: 'python.GetGlobal', title: 'GetGlobal', category: 'Globals',
+    id: 'python.GetGlobal', title: 'GetGlobal',
   inputType: 'None',
   outputType: 'DataFrame',
     defaultParams: { name: 'alpha' },
@@ -194,7 +194,7 @@ else:
 
   // File: ReadText
   reg.node({
-    id: 'python.FileReadText', title: 'ReadText', category: 'Files',
+    id: 'python.FileReadText', title: 'ReadText',
   inputType: 'None',
   outputType: 'DataFrame',
     defaultParams: { mode:'path', path: '', inline:'' },
@@ -234,7 +234,7 @@ else:
 
   // File: WriteCSV (pass-through)
   reg.node({
-    id: 'python.FileWriteCSV', title: 'WriteCSV', category: 'Files',
+    id: 'python.FileWriteCSV', title: 'WriteCSV',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { mode:'path', path: '', filename:'data.csv' },
@@ -263,7 +263,7 @@ else:
 
   // Python Exec (free-form) – pass-through by default
   reg.node({
-    id: 'python.Exec', title: 'PythonExec', category: 'Advanced',
+    id: 'python.Exec', title: 'PythonExec',
   inputType: 'DataFrame|Any',
   outputType: 'DataFrame|Any',
     defaultParams: { code: '# df is available here\n# Example: df["new"] = 1' },
@@ -286,7 +286,7 @@ else:
 
   // IfApply – when condition True, run body; else passthrough
   reg.node({
-    id: 'python.If', title: 'If', category: 'Control',
+    id: 'python.If', title: 'If',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { condition: "len(df) > 0", then: "# df = df\n# e.g., df = df.head(5)", else: "# else: pass" },
@@ -314,7 +314,7 @@ else:
 
   // ForApply – repeat N times body(df, i)
   reg.node({
-    id: 'python.For', title: 'For', category: 'Control',
+    id: 'python.For', title: 'For',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { times: '3', break_if: '', body: '# df and i are available\n# e.g., df["i"] = i' },
@@ -336,7 +336,7 @@ else:
 
   // WhileApply – while condition and i<max
   reg.node({
-    id: 'python.While', title: 'While', category: 'Control',
+    id: 'python.While', title: 'While',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { condition: 'len(df) > 1', break_if:'', max_iter: '10', body: '# mutate df until condition becomes False' },
@@ -353,742 +353,6 @@ else:
         `${v} = ${src}`,
         `i = 0` ,
         `while True:\n    try:\n        _c = bool(eval(r'''${cond}'''))\n    except Exception:\n        _c = False\n    try:\n        _br = bool(eval(r'''${br}''')) if r'''${br}''' else False\n    except Exception:\n        _br = False\n    if not _c or i >= ${maxIt} or _br:\n        break\n    df = ${v}\n    exec(r'''${body}''')\n    ${v} = df\n    i += 1`,
-        `print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // ===== Basic utilities (new) =====
-  // Const – create a constant value
-  reg.node({
-    id: 'python.Const', title: 'Const', category: 'Basics',
-    inputType: 'None',
-    outputType: 'Any',
-    defaultParams: { type: 'number', value: '1', name: 'const' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>type</label>
-      <select name="type">
-        <option value="number" ${String(v.type||'number')==='number'?'selected':''}>number</option>
-        <option value="string" ${String(v.type)==='string'?'selected':''}>string</option>
-        <option value="bool" ${String(v.type)==='bool'?'selected':''}>bool</option>
-        <option value="none" ${String(v.type)==='none'?'selected':''}>None</option>
-        <option value="python" ${String(v.type)==='python'?'selected':''}>python (expr)</option>
-      </select>
-      <label>value</label>
-      <input name="value" value="${(v.value||'').replace(/"/g,'&quot;')}">
-      <label>assign to global (optional)</label>
-      <input name="name" value="${v.name||'const'}" placeholder="const">
-    `; },
-    code(node){
-      const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const t=String(node.params?.type||'number').replace(/`/g,'');
-      const val=String(node.params?.value||'').replace(/`/g,'');
-      const name=String(node.params?.name||'').replace(/`/g,'');
-      return [
-        `try:
-  _t = r'''${t}'''
-  if _t == 'number':
-    ${v} = float(r'''${val}''') if r'''${val}''' else 0.0
-  elif _t == 'string':
-    ${v} = r'''${val}'''
-  elif _t == 'bool':
-    ${v} = (str(r'''${val}''').strip().lower() in ('1','true','yes','on'))
-  elif _t == 'none':
-    ${v} = None
-  else:
-    # python expr
-    ${v} = eval(r'''${val}''')
-  _name = r'''${name}'''
-  if _name:
-    globals()[_name] = ${v}
-except Exception as _e:
-  print('CONST_ERROR:', _e)
-  ${v} = None`,
-        `print(str(${v}))`
-      ];
-    }
-  });
-
-  // Print – diagnostic print (passthrough)
-  reg.node({
-    id: 'python.Print', title: 'Print', category: 'Basics',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { mode: 'head', n: '5', message: '' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>mode</label>
-      <select name="mode">
-        <option value="head" ${String(v.mode||'head')==='head'?'selected':''}>head(df)</option>
-        <option value="info" ${String(v.mode)==='info'?'selected':''}>info(df)</option>
-        <option value="shape" ${String(v.mode)==='shape'?'selected':''}>shape(df)</option>
-        <option value="repr" ${String(v.mode)==='repr'?'selected':''}>repr(value)</option>
-      </select>
-      <label>n (for head)</label>
-      <input name="n" type="number" step="1" value="${v.n||'5'}">
-      <label>message (optional)</label>
-      <input name="message" value="${(v.message||'').replace(/"/g,'&quot;')}">
-    `; },
-    code(node, ctx){
-      const src = ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const mode=String(node.params?.mode||'head').replace(/`/g,'');
-      const n=parseInt(node.params?.n||'5')||5;
-      const msg=(node.params?.message||'').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `_msg = r'''${msg}'''
-print(_msg) if _msg else None`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  _mode = r'''${mode}'''
-  if _is_df:
-    if _mode == 'info':
-      import io as _io
-      _buf = _io.StringIO()
-      ${v}.info(buf=_buf)
-      print(_buf.getvalue())
-    elif _mode == 'shape':
-      print(str(${v}.shape))
-    else:
-      print(${v}.head(${n}).to_string())
-  else:
-    print(repr(${v}))
-except Exception as _e:
-  print('PRINT_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // Cast – convert type of value or DataFrame column
-  reg.node({
-    id: 'python.Cast', title: 'Cast', category: 'Transform',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { target: 'float', column: '', out: '' , errors: 'coerce', applyAll: 'false' },
-    form(node, ui){ const v=node.params||(node.params={}); const cols=(ui?.getUpstreamColumns?.(node))||[]; const listId=`cols-${node.id}`; const opts=cols.map(c=>`<option value="${c}">${c}</option>`).join(''); return `
-      <label>target type</label>
-      <select name="target">
-        <option>int</option><option selected>float</option><option>str</option><option>bool</option>
-      </select>
-      <label>column (optional)</label>
-      <input name="column" list="${listId}" value="${v.column||''}"><datalist id="${listId}">${opts}</datalist>
-      <label>out (optional; leave blank to overwrite)</label>
-      <input name="out" value="${v.out||''}">
-      <label>errors</label>
-      <select name="errors"><option ${String(v.errors||'coerce')==='raise'?'selected':''}>raise</option><option ${String(v.errors||'coerce')==='coerce'?'selected':''}>coerce</option><option ${String(v.errors||'coerce')==='ignore'?'selected':''}>ignore</option></select>
-      <label>apply to all columns when column is empty</label>
-      <select name="applyAll"><option value="false" ${String(v.applyAll||'false')!=='true'?'selected':''}>false</option><option value="true" ${String(v.applyAll)==='true'?'selected':''}>true</option></select>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const tgt=(node.params?.target||'float').replace(/`/g,'');
-      const col=(node.params?.column||'').replace(/`/g,'');
-      const out=(node.params?.out||'').replace(/`/g,'');
-      const errs=(node.params?.errors||'coerce').replace(/`/g,'');
-      const all=(String(node.params?.applyAll||'false')==='true');
-      return [
-        `${v} = ${src}`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  _tgt = r'''${tgt}'''
-  _errs = r'''${errs}'''
-  if _is_df and r'''${col}''':
-    _ser = ${v}[r'''${col}''']
-    if r'''${out}''':
-      ${v}[r'''${out}'''] = _ser.astype(_tgt, errors=_errs if _tgt in ('int','float','str','bool') else 'raise') if hasattr(_ser, 'astype') else _ser
-    else:
-      ${v}[r'''${col}'''] = _ser.astype(_tgt, errors=_errs if _tgt in ('int','float','str','bool') else 'raise') if hasattr(_ser, 'astype') else _ser
-  elif _is_df and ${all ? 'True' : 'False'} and not r'''${col}''':
-    for _c in list(${v}.columns):
-      try:
-        ${v}[_c] = ${v}[_c].astype(_tgt, errors=_errs) if hasattr(${v}[_c], 'astype') else ${v}[_c]
-      except Exception:
-        pass
-  else:
-    _x = ${v}
-    if _tgt == 'int': ${v} = int(_x)
-    elif _tgt == 'float': ${v} = float(_x)
-    elif _tgt == 'str': ${v} = str(_x)
-    elif _tgt == 'bool': ${v} = bool(_x)
-except Exception as _e:
-  print('CAST_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // ToDataFrame – coerce common Python objects to DataFrame
-  reg.node({
-    id: 'python.ToDataFrame', title: 'ToDataFrame', category: 'Basics',
-    inputType: 'Any',
-    outputType: 'DataFrame',
-    defaultParams: { orient:'auto', materialize: 'auto' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>orient</label>
-      <select name="orient"><option ${String(v.orient||'auto')==='auto'?'selected':''}>auto</option><option ${String(v.orient)==='records'?'selected':''}>records</option><option ${String(v.orient)==='index'?'selected':''}>index</option></select>
-      <label>materialize iterators</label>
-      <select name="materialize"><option ${String(v.materialize||'auto')==='auto'?'selected':''}>auto</option><option ${String(v.materialize)==='never'?'selected':''}>never</option></select>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const orient=String(node.params?.orient||'auto').replace(/`/g,'');
-      const mat=String(node.params?.materialize||'auto').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `# Materialize
-try:
-  if r'''${mat}''' == 'auto':
-    from collections.abc import Iterator
-    if isinstance(${v}, Iterator):
-      ${v} = list(${v})
-except Exception:
-  pass`,
-        `# Coerce
-try:
-  _o = r'''${orient}'''
-  import numpy as _np
-  if isinstance(${v}, pd.DataFrame):
-    pass
-  elif isinstance(${v}, (list, tuple, set)):
-    _tmp = list(${v})
-    if _tmp and isinstance(_tmp[0], dict):
-      ${v} = pd.DataFrame(_tmp)
-    else:
-      ${v} = pd.DataFrame({'value': _tmp})
-  elif isinstance(${v}, dict):
-    ${v} = pd.DataFrame([${v}]) if _o!='index' else pd.DataFrame.from_dict(${v}, orient='index').T
-  elif 'numpy' in str(type(${v})) or isinstance(${v}, getattr(_np, 'ndarray', tuple)):
-    try: ${v} = pd.DataFrame(${v})
-    except Exception: ${v} = pd.DataFrame()
-  else:
-    ${v} = pd.DataFrame({'value':[${v}]})
-except Exception:
-  ${v} = pd.DataFrame()`,
-        `print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // StringFormat – build string from template
-  reg.node({
-    id: 'python.StringFormat', title: 'StringFormat', category: 'Strings',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { template: 'Value={x}', out: 'text' },
-    form(node, ui){ const v=node.params||(node.params={}); const cols=(ui?.getUpstreamColumns?.(node))||[]; const listId=`cols-${node.id}`; const pill = (c)=>`<button type="button" class="insert-token" data-token="{${c}}" data-target="template" style="padding:4px 8px; border:1px solid #2a3445; background:#0b1018; color:var(--text); border-radius:999px; font-size:12px;">{${c}}</button>`; return `
-      <label>template (f-string)</label>
-      <textarea name="template" placeholder="Value={x}">${v.template||''}</textarea>
-      ${cols?.length? `<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px">${cols.map(pill).join('')}</div>`:''}
-      <label>output (for DataFrame or global)</label>
-      <input name="out" list="${listId}" value="${v.out||'text'}"><datalist id="${listId}">${cols.map(c=>`<option value="${c}">${c}</option>`).join('')}</datalist>
-      <div style="font-size:12px; opacity:0.8; margin-top:6px;">If input is a DataFrame, creates/overwrites the column.</div>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const tpl=(node.params?.template||'').replace(/`/g,'');
-      const out=(node.params?.out||'text').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  import math as _math
-  _tpl = f'''${'{'}${tpl}${'}'}'''
-  if _is_df:
-    def _fmt_row(_r):
-      _loc = { }
-      try:
-        _loc = dict(_r)
-      except Exception:
-        _loc = {}
-      try:
-        return eval(f"f'''{_tpl}'''", { 'math': _math, **globals() }, _loc)
-      except Exception:
-        try:
-          return str(_loc)
-        except Exception:
-          return ''
-    ${v}[r'''${out}'''] = ${v}.apply(_fmt_row, axis=1) if _is_df else None
-  else:
-    try:
-      globals()[r'''${out}'''] = eval(f"f'''{_tpl}'''", { 'math': _math, **globals() }, {})
-    except Exception as _e:
-      globals()[r'''${out}'''] = ''
-except Exception as _e:
-  print('STRING_FORMAT_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(globals().get(r'''${out}''',''))`
-      ];
-    }
-  });
-
-  // JsonParse – parse JSON string into Python/DF
-  reg.node({
-    id: 'python.JsonParse', title: 'JsonParse', category: 'JSON',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { column:'', out:'parsed', mode:'auto' },
-    form(node, ui){ const v=node.params||(node.params={}); const cols=(ui?.getUpstreamColumns?.(node))||[]; const listId=`cols-${node.id}`; return `
-      <label>column (if DataFrame)</label>
-      <input name="column" list="${listId}" value="${v.column||''}"><datalist id="${listId}">${cols.map(c=>`<option value="${c}">${c}</option>`).join('')}</datalist>
-      <label>out</label>
-      <input name="out" value="${v.out||'parsed'}">
-      <label>mode</label>
-      <select name="mode"><option ${String(v.mode||'auto')==='auto'?'selected':''}>auto</option><option ${String(v.mode)==='records'?'selected':''}>records</option><option ${String(v.mode)==='object'?'selected':''}>object</option></select>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const col=(node.params?.column||'').replace(/`/g,'');
-      const out=(node.params?.out||'parsed').replace(/`/g,'');
-      const mode=(node.params?.mode||'auto').replace(/`/g,'');
-  return [
-        `${v} = ${src}`,
-        `import json as _json
-try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  _mode = r'''${mode}'''
-  if _is_df and r'''${col}''':
-    def _parse_cell(_s):
-      try:
-        return _json.loads(_s)
-      except Exception:
-        return None
-    ${v}[r'''${out}'''] = ${v}[r'''${col}'''].apply(_parse_cell)
-  else:
-    _val = ${v}
-    try:
-      _obj = _json.loads(_val) if isinstance(_val, (str, bytes)) else _val
-    except Exception:
-      _obj = None
-    if isinstance(_obj, list):
-  ${v} = pd.DataFrame(_obj) if (_mode in ('auto','records')) else pd.DataFrame({'value':_obj})
-  print('[JsonParse:auto] interpreted as records') if _mode == 'auto' else None
-    elif isinstance(_obj, dict):
-  ${v} = pd.DataFrame([_obj]) if (_mode in ('auto','object')) else pd.DataFrame.from_dict(_obj, orient='index').T
-  print('[JsonParse:auto] interpreted as object') if _mode == 'auto' else None
-    else:
-      ${v} = pd.DataFrame({'value':[ _obj ]})
-except Exception as _e:
-  print('JSON_PARSE_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // JsonStringify – stringify Python/DF/row to JSON
-  reg.node({
-    id: 'python.JsonStringify', title: 'JsonStringify', category: 'JSON',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|str',
-    defaultParams: { column:'', out:'json', orient:'records', indent:'0' },
-    form(node, ui){ const v=node.params||(node.params={}); const cols=(ui?.getUpstreamColumns?.(node))||[]; const listId=`cols-${node.id}`; return `
-      <label>column (optional; when set, dumps each cell)</label>
-      <input name="column" list="${listId}" value="${v.column||''}"><datalist id="${listId}">${cols.map(c=>`<option value="${c}">${c}</option>`).join('')}</datalist>
-      <label>out</label>
-      <input name="out" value="${v.out||'json'}">
-      <label>orient (when dumping rows)</label>
-      <select name="orient"><option ${String(v.orient||'records')==='records'?'selected':''}>records</option><option ${String(v.orient)==='index'?'selected':''}>index</option></select>
-      <label>indent</label>
-      <input name="indent" type="number" step="1" value="${v.indent||'0'}">
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const col=(node.params?.column||'').replace(/`/g,'');
-      const out=(node.params?.out||'json').replace(/`/g,'');
-      const orient=(node.params?.orient||'records').replace(/`/g,'');
-      const indent=parseInt(node.params?.indent||'0')||0;
-      return [
-        `${v} = ${src}`,
-        `import json as _json
-try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  if _is_df:
-    if r'''${col}''':
-      ${v}[r'''${out}'''] = ${v}[r'''${col}'''].apply(lambda _x: _json.dumps(_x, ensure_ascii=False, indent=${indent}))
-    else:
-      _rows = ${v}.to_dict(orient=r'''${orient}''') if hasattr(${v}, 'to_dict') else []
-      ${v}[r'''${out}'''] = pd.Series([_json.dumps(_rows, ensure_ascii=False, indent=${indent})]*len(${v}))
-  else:
-    globals()[r'''${out}'''] = _json.dumps(${v}, ensure_ascii=False, indent=${indent})
-except Exception as _e:
-  print('JSON_STRINGIFY_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(globals().get(r'''${out}''',''))`
-      ];
-    }
-  });
-
-  // Now – current datetime
-  reg.node({
-    id: 'python.Now', title: 'Now', category: 'Dates',
-    inputType: 'None',
-    outputType: 'Any',
-    defaultParams: { tz:'', as:'datetime', out:'now' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>tz (IANA, e.g., Asia/Tokyo) optional</label>
-      <input name="tz" value="${v.tz||''}">
-      <label>as</label>
-      <select name="as"><option ${String(v.as||'datetime')==='datetime'?'selected':''}>datetime</option><option ${String(v.as)==='iso'?'selected':''}>iso</option><option ${String(v.as)==='timestamp'?'selected':''}>timestamp</option></select>
-      <label>assign to global</label>
-      <input name="out" value="${v.out||'now'}">
-    `; },
-    code(node){
-      const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const tz=(node.params?.tz||'').replace(/`/g,'');
-      const asT=(node.params?.as||'datetime').replace(/`/g,'');
-      const out=(node.params?.out||'now').replace(/`/g,'');
-      return [
-        `from datetime import datetime, timezone
-try:
-  _tz_name = r'''${tz}'''
-  if _tz_name:
-    try:
-      from zoneinfo import ZoneInfo
-      _tz = ZoneInfo(_tz_name)
-    except Exception:
-      _tz = None
-  else:
-    _tz = None
-  _dt = datetime.now(_tz) if _tz else datetime.now()
-  _as = r'''${asT}'''
-  if _as == 'iso':
-    ${v} = _dt.isoformat()
-  elif _as == 'timestamp':
-    ${v} = _dt.timestamp()
-  else:
-    ${v} = _dt
-  globals()[r'''${out}'''] = ${v}
-except Exception as _e:
-  print('NOW_ERROR:', _e)
-  ${v} = None`,
-        `print(str(${v}))`
-      ];
-    }
-  });
-
-  // ParseDate – parse string column to datetime
-  reg.node({
-    id: 'python.ParseDate', title: 'ParseDate', category: 'Dates',
-    inputType: 'DataFrame',
-    outputType: 'DataFrame',
-    defaultParams: { column:'', format:'', utc:'false', errors:'coerce', out:'', applyAll:'false' },
-    form(node, ui){ const v=node.params||(node.params={}); const cols=(ui?.getUpstreamColumns?.(node))||[]; const listId=`cols-${node.id}`; return `
-      <label>column</label>
-      <input name="column" list="${listId}" value="${v.column||''}"><datalist id="${listId}">${cols.map(c=>`<option value="${c}">${c}</option>`).join('')}</datalist>
-      <label>format (optional)</label><input name="format" value="${(v.format||'').replace(/"/g,'&quot;')}">
-      <label>utc</label><select name="utc"><option value="false" ${String(v.utc||'false')!=='true'?'selected':''}>false</option><option value="true" ${String(v.utc)==='true'?'selected':''}>true</option></select>
-      <label>errors</label><select name="errors"><option ${String(v.errors||'coerce')==='raise'?'selected':''}>raise</option><option ${String(v.errors||'coerce')==='coerce'?'selected':''}>coerce</option><option ${String(v.errors||'coerce')==='ignore'?'selected':''}>ignore</option></select>
-      <label>out (optional; blank to overwrite)</label><input name="out" value="${v.out||''}">
-      <label>apply to all columns when column is empty</label><select name="applyAll"><option value="false" ${String(v.applyAll||'false')!=='true'?'selected':''}>false</option><option value="true" ${String(v.applyAll)==='true'?'selected':''}>true</option></select>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const col=(node.params?.column||'').replace(/`/g,'');
-      const fmt=(node.params?.format||'').replace(/`/g,'');
-      const utc=String(node.params?.utc||'false').replace(/`/g,'');
-      const errs=(node.params?.errors||'coerce').replace(/`/g,'');
-      const out=(node.params?.out||'').replace(/`/g,'');
-      const all=(String(node.params?.applyAll||'false')==='true');
-      return [
-        `${v} = ${src}`,
-        `try:
-  _kwargs = {}
-  if r'''${fmt}''': _kwargs['format'] = r'''${fmt}'''
-  if r'''${utc}''' == 'true': _kwargs['utc'] = True
-  if r'''${col}''':
-    _ser = pd.to_datetime(${v}[r'''${col}'''], errors=r'''${errs}''', **_kwargs)
-    if r'''${out}''':
-      ${v}[r'''${out}'''] = _ser
-    else:
-      ${v}[r'''${col}'''] = _ser
-  elif ${all ? 'True' : 'False'}:
-    for _c in list(${v}.columns):
-      try:
-        ${v}[_c] = pd.to_datetime(${v}[_c], errors=r'''${errs}''', **_kwargs)
-      except Exception:
-        pass
-except Exception as _e:
-  print('PARSE_DATE_ERROR:', _e)`,
-        `print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // Try – try/except/finally around code with df
-  reg.node({
-    id: 'python.Try', title: 'Try', category: 'Control',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { try: 'df = df', except: '# on error: pass', finally: '# always', default: '' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>try</label><textarea name="try">${v.try||'df = df'}</textarea>
-      <label>except</label><textarea name="except">${v.except||'# on error: pass'}</textarea>
-      <label>finally</label><textarea name="finally">${v.finally||'# always'}</textarea>
-      <label>default (on error; Python expr)</label><input name="default" value="${(v.default||'').replace(/"/g,'&quot;')}">
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const t=(node.params?.try||'').replace(/`/g,'');
-      const ex=(node.params?.except||'').replace(/`/g,'');
-      const fi=(node.params?.finally||'').replace(/`/g,'');
-      const dft=(node.params?.default||'').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `try:
-  df = ${v}
-  exec(r'''${t}''')
-  ${v} = df
-except Exception as _e:
-  try:
-    df = ${v}
-    exec(r'''${ex}''')
-    ${v} = df
-  except Exception as _e2:
-    try:
-      ${v} = eval(r'''${dft}''') if r'''${dft}''' else ${v}
-    except Exception:
-      pass
-finally:
-  try:
-    df = ${v}
-    exec(r'''${fi}''')
-    ${v} = df
-  except Exception:
-    pass`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False
-print(${v}.head().to_string()) if _is_df else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // Switch – select code by value
-  reg.node({
-    id: 'python.Switch', title: 'Switch', category: 'Control',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { expr: '0', cases: '0: df = df\n1: df = df.head(1)', default: '# no-op' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>expr (Python)</label><input name="expr" value="${(v.expr||'').replace(/"/g,'&quot;')}">
-      <label>cases (one per line: when: code)</label><textarea name="cases" placeholder="0: df = df\n1: df = df.head(1)">${v.cases||''}</textarea>
-      <label>default</label><textarea name="default">${v.default||'# no-op'}</textarea>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const expr=(node.params?.expr||'').replace(/`/g,'');
-      const cases=(node.params?.cases||'').replace(/`/g,'');
-      const dflt=(node.params?.default||'').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `_val = None
-try:
-  _val = eval(r'''${expr}''')
-except Exception:
-  _val = None`,
-        `_matched = False
-for _line in r'''${cases}'''.splitlines():
-  _line = _line.strip()
-  if not _line or ':' not in _line: continue
-  _k, _code = _line.split(':', 1)
-  _k = _k.strip()
-  _code = _code.strip()
-  try:
-    import ast as _ast
-    _key = _ast.literal_eval(_k)
-  except Exception:
-    _key = _k
-  if _val == _key:
-    df = ${v}
-    try:
-      exec(_code)
-      ${v} = df
-      _matched = True
-      break
-    except Exception as _e:
-      print('SWITCH_CASE_ERROR:', _e)
-      break`,
-        `if not _matched:
-  df = ${v}
-  try:
-    exec(r'''${dflt}''')
-    ${v} = df
-  except Exception as _e:
-    print('SWITCH_DEFAULT_ERROR:', _e)`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False
-print(${v}.head().to_string()) if _is_df else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // Enumerate – add sequential index or enumerate iterable
-  reg.node({
-    id: 'python.Enumerate', title: 'Enumerate', category: 'Basics',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { start:'0', indexCol:'i', valueCol:'value' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>start</label><input name="start" type="number" step="1" value="${v.start||'0'}">
-      <label>index column (for DF)</label><input name="indexCol" value="${v.indexCol||'i'}">
-      <label>value column (when building DF)</label><input name="valueCol" value="${v.valueCol||'value'}">
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const start=parseInt(node.params?.start||'0')||0;
-      const idx=(node.params?.indexCol||'i').replace(/`/g,'');
-      const val=(node.params?.valueCol||'value').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  if _is_df:
-    ${v}[r'''${idx}'''] = range(${start}, ${start})
-    ${v}[r'''${idx}'''] = range(${start}, ${start} + len(${v}))
-  else:
-    try:
-      _lst = list(${v})
-    except Exception:
-      _lst = []
-    ${v} = pd.DataFrame({r'''${idx}''': list(range(${start}, ${start}+len(_lst))), r'''${val}''': _lst})
-except Exception as _e:
-  print('ENUMERATE_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if isinstance(${v}, pd.DataFrame) else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // Assert – validate a condition
-  reg.node({
-    id: 'python.Assert', title: 'Assert', category: 'Control',
-    inputType: 'DataFrame|Any',
-    outputType: 'DataFrame|Any',
-    defaultParams: { condition: 'len(df) > 0', message: 'assertion failed', action:'error' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>condition (Python expr)</label><input name="condition" value="${(v.condition||'').replace(/"/g,'&quot;')}">
-      <label>message</label><input name="message" value="${(v.message||'').replace(/"/g,'&quot;')}">
-      <label>action</label><select name="action"><option value="error" ${String(v.action||'error')==='error'?'selected':''}>error</option><option value="warn" ${String(v.action)==='warn'?'selected':''}>warn</option><option value="pass" ${String(v.action)==='pass'?'selected':''}>pass</option></select>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const cond=(node.params?.condition||'').replace(/`/g,'');
-      const msg=(node.params?.message||'assertion failed').replace(/`/g,'');
-      const act=(node.params?.action||'error').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `try:
-  df = ${v}
-  _ok = bool(eval(r'''${cond}'''))
-except Exception:
-  _ok = False`,
-        `if not _ok:
-  if r'''${act}''' == 'warn':
-    print('[WARN]', r'''${msg}''')
-  elif r'''${act}''' == 'pass':
-    print('[PASS]', r'''${msg}''')
-  else:
-    raise AssertionError(r'''${msg}''')`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False
-print(${v}.head().to_string()) if _is_df else print(repr(${v}))`
-      ];
-    }
-  });
-
-  // Repeat – replicate input N times and add index column i
-  reg.node({
-    id: 'python.Repeat', title: 'Repeat', category: 'Control',
-    inputType: 'DataFrame|Any|None',
-    outputType: 'DataFrame',
-    defaultParams: { times: '3', index: 'i' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>times</label><input name="times" type="number" step="1" value="${v.times||'3'}">
-      <label>index column</label><input name="index" value="${v.index||'i'}">
-      <div style="font-size:12px; opacity:0.8; margin-top:6px;">InputがDataFrameなら各行をtimes回複製し、反復番号を列に付与します。InputがNone/非DFなら i 列のみのDataFrameを生成します。</div>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const times=parseInt(node.params?.times||'3')||3; const idx=(node.params?.index||'i').replace(/`/g,'');
-      return [
-        `${v} = ${src ? src : 'None'}`,
-        `try:
-  _is_df = isinstance(${v}, pd.DataFrame)
-except Exception:
-  _is_df = False`,
-        `try:
-  _t = ${times}
-  _idx = r'''${idx}'''
-  if _is_df:
-    _frames = []
-    for _i in range(_t):
-      try:
-        _tmp = ${v}.copy()
-      except Exception:
-        _tmp = ${v}
-      try:
-        _tmp[_idx] = _i
-      except Exception:
-        pass
-      _frames.append(_tmp)
-    ${v} = pd.concat(_frames, ignore_index=True) if _frames else pd.DataFrame()
-  else:
-    ${v} = pd.DataFrame({_idx: list(range(_t))})
-except Exception as _e:
-  print('REPEAT_ERROR:', _e)
-  ${v} = pd.DataFrame()`,
-        `print(${v}.head().to_string())`
-      ];
-    }
-  });
-
-  // FilterRows – filter DataFrame by expression (no code block)
-  reg.node({
-    id: 'python.Filter', title: 'FilterRows', category: 'Transform',
-    inputType: 'DataFrame',
-    outputType: 'DataFrame',
-    defaultParams: { expr: 'True' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>expr (pandas query)</label>
-      <input name="expr" value="${(v.expr||'True').replace(/"/g,'&quot;')}" placeholder="i < 3 and x > 0">
-      <div style="font-size:12px; opacity:0.8; margin-top:6px;">pandasのquery式（and/or/==/&lt;/&gt;）。失敗時はeval+ブールマスクを試行。</div>
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const expr=(node.params?.expr||'True').replace(/`/g,'');
-      return [
-        `${v} = ${src}`,
-        `try:
-  _expr = r'''${expr}'''
-  try:
-    ${v} = ${v}.query(_expr)
-  except Exception:
-    try:
-      _mask = ${v}.eval(_expr)
-      ${v} = ${v}[_mask]
-    except Exception as _e2:
-      print('FILTER_ERROR:', _e2)
-except Exception as _e:
-  print('FILTER_ERROR:', _e)`,
         `print(${v}.head().to_string())`
       ];
     }

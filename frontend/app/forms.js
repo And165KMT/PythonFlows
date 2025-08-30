@@ -129,20 +129,15 @@ export function bindForm(el, node, refreshForms) {
         if (window.showOpenFilePicker) {
           const [fileHandle] = await window.showOpenFilePicker({ multiple: false });
           const file = await fileHandle.getFile();
+          const text = await file.text();
           const pathInput = el.querySelector('input[name="path"]');
           if (pathInput) { pathInput.value = file.name; }
           node.params = node.params || {};
-          if (node.type === 'pandas.ReadCSV') {
-            const text = await file.text();
-            node.params.mode = 'inline';
-            node.params.inline = text;
-            if (info) info.textContent = `Loaded ${file.name} into inline`;
-            el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: () => computeUpstreamColumns(node), getUpstreamNode: () => upstreamOf(node) });
-            bindForm(el, node, refreshForms);
-          } else {
-            // For non-CSV readers, suggest using Upload...
-            if (info) info.textContent = `Selected ${file.name}. Use Upload... to send to server.`;
-          }
+          node.params.mode = 'inline';
+          node.params.inline = text;
+          if (info) info.textContent = `Loaded ${file.name} into inline`;
+          el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: () => computeUpstreamColumns(node), getUpstreamNode: () => upstreamOf(node) });
+          bindForm(el, node, refreshForms);
         } else {
           const input = document.createElement('input');
           input.type = 'file'; input.style.display = 'none';
@@ -150,55 +145,20 @@ export function bindForm(el, node, refreshForms) {
           input.addEventListener('change', async () => {
             const f = input.files && input.files[0];
             if (f) {
+              const text = await f.text();
               const pathInput = el.querySelector('input[name="path"]');
               if (pathInput) { pathInput.value = f.name; }
               node.params = node.params || {};
-              if (node.type === 'pandas.ReadCSV') {
-                const text = await f.text();
-                node.params.mode = 'inline';
-                node.params.inline = text;
-                if (info) info.textContent = `Loaded ${f.name} into inline`;
-                el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: () => computeUpstreamColumns(node), getUpstreamNode: () => upstreamOf(node) });
-                bindForm(el, node, refreshForms);
-              } else {
-                if (info) info.textContent = `Selected ${f.name}. Use Upload... to send to server.`;
-              }
+              node.params.mode = 'inline';
+              node.params.inline = text;
+              if (info) info.textContent = `Loaded ${f.name} into inline`;
+              el.querySelector('.body').innerHTML = registry.nodes.get(node.type).form(node, { getUpstreamColumns: () => computeUpstreamColumns(node), getUpstreamNode: () => upstreamOf(node) });
+              bindForm(el, node, refreshForms);
             }
             input.remove();
           }, { once: true });
           input.click();
         }
-      } catch {}
-    });
-  }
-
-  // Upload file to server (for ReadCSV upload mode)
-  const uploadBtn = el.querySelector('.upload-file');
-  if (uploadBtn) {
-    uploadBtn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      try {
-        const pick = document.createElement('input');
-        pick.type = 'file';
-        // Accept types based on node
-        if (node.type === 'pandas.ReadCSV') pick.accept = '.csv,text/csv';
-        else if (node.type === 'pandas.ReadParquet') pick.accept = '.parquet,application/octet-stream';
-        else if (node.type === 'pandas.ReadExcel') pick.accept = '.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel';
-        pick.style.display = 'none';
-        document.body.appendChild(pick);
-        pick.addEventListener('change', async () => {
-          const f = pick.files && pick.files[0];
-          if (!f) { pick.remove(); return; }
-          const fd = new FormData(); fd.append('file', f, f.name);
-          const res = await fetch('/api/uploads', { method: 'POST', body: fd });
-          const js = await res.json().catch(()=>({}));
-          if (js && js.ok && (js.path || js.name)) {
-            node.params = node.params || {}; node.params.upload = js.path || js.name;
-            const input = el.querySelector('input[name="upload"]'); if (input) input.value = (js.name || '');
-          }
-          pick.remove();
-        }, { once: true });
-        pick.click();
       } catch {}
     });
   }
@@ -214,39 +174,6 @@ export function bindForm(el, node, refreshForms) {
         const hidden = el.querySelector('input[name="op"]');
         if (hidden) hidden.value = op;
         refreshForms();
-      });
-    });
-  }
-
-  // Token insert buttons (e.g., StringFormat column tokens)
-  const tokenBtns = el.querySelectorAll('.insert-token');
-  if (tokenBtns && tokenBtns.length) {
-    tokenBtns.forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const token = btn.getAttribute('data-token') || '';
-        const targetName = btn.getAttribute('data-target') || '';
-        if (!targetName) return;
-        const target = el.querySelector(`[name="${targetName}"]`);
-        if (!target) return;
-        try {
-          const start = target.selectionStart ?? target.value.length;
-          const end = target.selectionEnd ?? target.value.length;
-          const val = target.value || '';
-          target.value = val.slice(0, start) + token + val.slice(end);
-          // move caret after inserted token
-          const pos = start + token.length;
-          if (typeof target.setSelectionRange === 'function') {
-            target.setSelectionRange(pos, pos);
-          }
-          target.dispatchEvent(new Event('input', { bubbles: true }));
-          target.dispatchEvent(new Event('change', { bubbles: true }));
-        } catch {
-          // fallback: append
-          target.value = (target.value || '') + token;
-          target.dispatchEvent(new Event('input', { bubbles: true }));
-          target.dispatchEvent(new Event('change', { bubbles: true }));
-        }
       });
     });
   }

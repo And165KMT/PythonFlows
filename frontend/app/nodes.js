@@ -347,24 +347,7 @@ export function genCode(){
     '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
     '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
     '    except Exception:',
-    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
-    '',
-    'try:',
-    '    __pf_hash',
-    'except NameError:',
-    '    __pf_hash = {}',
-    'def _fp_should_run(nid, h):',
-    '    try:',
-    '        d = __pf_hash',
-    '    except NameError:',
-    '        d = {}',
-    '    prev = d.get(nid)',
-    '    if prev == h:',
-    '        print(f"[[SKIP:{nid}]]")',
-    '        return False',
-    '    d[nid] = h',
-    '    globals()["__pf_hash"] = d',
-    '    return True'
+    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
   ];
   const lines = [...header]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
@@ -373,7 +356,7 @@ export function genCode(){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
      const allowPreview = (pmode==='all');
      if(allowPreview){
        lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -451,7 +434,7 @@ export function genCodeForNodes(ids, includeUpstream=true){
     "            rows.append((__name, type(__val).__name__, repr(__val)[:200]))",
     '        except Exception:',
     "            rows.append((__name, 'unknown', '<unrepr>'))",
-  "    return pd.DataFrame(rows, columns=['name','type','repr'])",
+    "    return pd.DataFrame(rows, columns=['name','type','repr'])",
     '',
     'def _fp_preview(df, nid):',
     '    try:',
@@ -463,24 +446,7 @@ export function genCodeForNodes(ids, includeUpstream=true){
     '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
     '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
     '    except Exception:',
-  '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
-  '',
-  'try:',
-  '    __pf_hash',
-  'except NameError:',
-  '    __pf_hash = {}',
-  'def _fp_should_run(nid, h):',
-  '    try:',
-  '        d = __pf_hash',
-  '    except NameError:',
-  '        d = {}',
-  '    prev = d.get(nid)',
-  '    if prev == h:',
-  '        print(f"[[SKIP:{nid}]]")',
-  '        return False',
-  '    d[nid] = h',
-  '    globals()["__pf_hash"] = d',
-  '    return True'
+    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
   ];
   const lines = [...header]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
@@ -489,7 +455,7 @@ export function genCodeForNodes(ids, includeUpstream=true){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -556,7 +522,7 @@ export function genCodeUpTo(targetId){
     '            rows.append((__name, type(__val).__name__, repr(__val)[:200]))',
     '        except Exception:',
     "            rows.append((__name, 'unknown', '<unrepr>'))",
-  "    return pd.DataFrame(rows, columns=['name','type','repr'])",
+    "    return pd.DataFrame(rows, columns=['name','type','repr'])",
     '',
     'def _fp_preview(df, nid):',
     '    try:',
@@ -568,24 +534,7 @@ export function genCodeUpTo(targetId){
     '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
     '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
     '    except Exception:',
-  '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
-  '',
-  'try:',
-  '    __pf_hash',
-  'except NameError:',
-  '    __pf_hash = {}',
-  'def _fp_should_run(nid, h):',
-  '    try:',
-  '        d = __pf_hash',
-  '    except NameError:',
-  '        d = {}',
-  '    prev = d.get(nid)',
-  '    if prev == h:',
-  '        print(f"[[SKIP:{nid}]]")',
-  '        return False',
-  '    d[nid] = h',
-  '    globals()["__pf_hash"] = d',
-  '    return True'
+    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")'
   ];
   const lines = [...header]; const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
@@ -594,7 +543,7 @@ export function genCodeUpTo(targetId){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const seg = (def.code(n, ctx) || []).map(s=> '  ' + s); lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); if(def && typeof def.code==='function'){ const seg = def.code(n, ctx) || []; seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -614,12 +563,8 @@ export async function loadPackages(){
         if(mod && typeof mod.register==='function'){
           const reg = { node(def){ if(!def || !def.id) return; registry.nodes.set(def.id, def); const pkgName = p.name; if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []); registry.byPackage.get(pkgName).push(def.id); } };
           mod.register(reg);
-        } else {
-          console.warn('[packages] no register() exported by', p.name);
         }
-      }catch(e){
-        try{ console.warn('[packages] failed to load', p?.name, e); }catch{}
-      }
+      }catch(e){ /* swallow */ }
     }
     state.activePkg = registry.packages[0]?.name || null;
   }catch{

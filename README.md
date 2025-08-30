@@ -1,133 +1,99 @@
-# PythonFlows (aka FlowPython)
+# PythonFlows
 
-ローカルファーストの「ブロック線図でPythonを実行」プロトタイプです。
-- Backend: FastAPI + Jupyter Kernel（jupyter_client）
-- Frontend: 静的 HTML/ESM JavaScript（カスタムUI）
-- Flow: 生成したPythonコードをKernelへ送り、IOPubをWebSocketでストリーム表示
+This is a minimal local-first prototype:
+- Backend: FastAPI + Jupyter kernel via jupyter_client
+- Frontend: static HTML/JS
+- Flow: single-page UI that sends Python code to the kernel and streams iopub messages
 
-デモとスクリーンショット:
-- 画像: `image.png`
-- 動画: Demo.mp4（再生はローカルで）
+Quickstart (Windows PowerShell):
+1) Install Python 3.10+ and ensure `python` is on PATH
+2) Create and activate a virtual environment (optional but recommended)
+3) Install backend requirements
+4) Run the backend:
 
-Quickstart（Windows）
+	```powershell
+	# (optional) create venv
+	python -m venv .venv
+	.\.venv\Scripts\Activate.ps1
 
-Option A — ローカルPython実行（最短）
-1) Python 3.10+ をインストールし、`python` が PATH にあることを確認
-2) 任意（推奨）: 仮想環境作成 → `python -m venv .venv`
-3) 依存関係をインストール → `python -m pip install -r backend/requirements.txt`
-4) サーバ起動 → `run-backend.cmd`（ダブルクリックでも可）
+	# install deps
+	python -m pip install -r backend/requirements.txt
 
-Option B — Docker（ローカルにPython不要）
-1) Docker Desktop をインストール
-2) ビルド＆起動（ボリュームでフローを永続化）
+	# start server
+	.\.venv\Scripts\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+	```
 
-```
-docker build -t pythonflows:dev .
-docker run --rm -p 8000:8000 -e PYFLOWS_ENABLE_KERNEL=1 -v %cd%/data:/data/flows pythonflows:dev
-```
+5) Open http://localhost:8000 in your browser
+![alt text](image.png)
+Notes:
+License:
+- This repository is released under FlowPython Community Edition License (FP-CEL). Individuals are free to use; companies must contact us for commercial use or for more than one sheet. See LICENSE.md.
 
-Option C — Docker Compose（永続化込みの簡単起動）
+## Feature flags and licensing
 
-```
-docker compose up --build
-```
+The Jupyter kernel capability can be disabled for non-paid editions.
 
-ブラウザで http://localhost:8000 を開きます。
+- Disable explicitly:
+	- PowerShell: `$env:PYFLOWS_DISABLE_KERNEL = "1"`
+- Enable explicitly (overrides disable):
+	- PowerShell: `$env:PYFLOWS_ENABLE_KERNEL = "1"`
+- License-gated (stub): set a license key plus optional allow flag in development:
+	- `$env:PYFLOWS_LICENSE_KEY = "<your-license-key>"`
+	- `$env:PYFLOWS_LICENSE_ALLOW = "1"`  # dev/test only, accepts any key
 
-ライセンス:
-- FlowPython Community Edition License (FP-CEL)。個人利用は自由、企業利用や複数シートは要連絡。詳細は `LICENSE.md` を参照。
-	- 将来の商用方針: `LICENSING.md` を参照（ドラフト）
+When disabled, `/run`, `/api/variables`, `/restart`, and `/ws` return 403 or an empty payload. `/health` returns `{ kernel: "disabled" }`.
 
-## 主要機能（現状）
+## Security note (important)
 
-- ノードキャンバス（ドラッグ配置・接続・複数選択・グループ化/Subsystem）
-- Pandas系ノード多数（ReadCSV/Excel/Parquet, Filter/Assign/GroupBy/Join/Concat/Describe/Plot 等）
-- 右ペインのプレビューとログ、プレビュー表示モード（All / Plots / None）
-- 変数インスペクタ（CSVダウンロード、DataFrameプレビュー、ダブルクリックでプレビュー）
-- ファイルアップロードAPI（CSV等をサーバに置いてパスで参照可能）
-- フローの保存/読込（JSON, デフォルトで`/data/flows`に保存）
-- WebSocketでIOPubメッセージをストリーム受信（画像は自動プレビュー）
-- 実行差分のスキップ（ノードパラメータのハッシュ一致時に[[SKIP]]）
-- 認証トークン（任意）に対応（HTTPはAuthorizationヘッダ、WSは`?token=`）
+- This app executes arbitrary Python code via a Jupyter kernel. Use on your local machine and do not expose to the internet.
+- If you need to access from other devices, put it behind proper authentication and network controls. Prefer `--host 127.0.0.1`.
+- Consider restricting CORS to your origin only (future versions will support env-based origin control).
 
-補助機能：
-- 文字列パラメータ内の `${varName}` 置換（_fp_render）
-- 式評価 `_fp_eval()`（カーネルのグローバル/ローカルを参照）
+## API endpoints (overview)
 
-## セキュリティ注意
+- GET `/`                    ... serve frontend
+- GET `/health`              ... kernel status (ok/down/disabled)
+- POST `/run`                ... execute generated code on the kernel (body: `{ code: string }`)
+- POST `/restart`            ... restart the kernel
+- GET `/api/variables`       ... list kernel global variables (best-effort)
+- WS  `/ws`                  ... iopub message stream (display_data/execute_result/stream/error/status)
 
-- 任意のPythonコードを実行します。基本はローカル専用で、インターネット公開しないでください。
-- 他端末からアクセスする場合は、認証（`PYFLOWS_API_TOKEN`）やネットワーク制御の上で実施してください。
- - 詳細は `SECURITY.md` を参照してください。
- - ライセンス上も、Community Edition では公衆インターネット公開（自己ホスティング含む）を禁止しています（`LICENSE.md`）。
+## Use a remote kernel via Azure (Jupyter Enterprise Gateway)
 
-## API エンドポイント（概要）
+You can run all code on a remote Jupyter Enterprise Gateway (e.g., deployed to Azure AKS/Container Apps) by setting environment variables before starting the backend.
 
-- GET `/`                 … フロントエンド
-- GET `/health`           … カーネル状態（ok/down/disabled）と認証要否
-- POST `/run`             … 生成コードを実行（body: `{ code: string }`）
-- POST `/restart`         … カーネル再起動
-- GET `/api/variables`    … グローバル変数の一覧（DataFrameはHTMLプレビュー付き）
-- GET `/api/variables/{name}/export?format=csv&rows=N` … 変数をCSV/TEXTでダウンロード
-- WS  `/ws`               … IOPubストリーム（display_data/execute_result/stream/error/status）
-- GET `/api/packages`     … 利用可能パッケージ一覧（フロントのノード登録用）
-- Flows（永続化）
-	- GET `/api/flows` … 一覧
-	- GET `/api/flows/{name}.json` … 取得
-	- POST `/api/flows/{name}.json` … 保存（Pydanticでバリデーション）
-	- DELETE `/api/flows/{name}.json` … 削除
-- Uploads（サーバにファイル配置）
-	- GET `/api/uploads` … 一覧
-	- POST `/api/uploads` … アップロード（multipart/form-data, `file`）
-	- GET `/api/uploads/{name}` … 取得
-	- DELETE `/api/uploads/{name}` … 削除
+- Prerequisites:
+	- A reachable Enterprise Gateway endpoint (HTTPS recommended) that allows WebSocket upgrades.
+	- An auth token if the gateway requires it.
 
-## 認証（任意）
+- Environment variables (Windows PowerShell):
+	- `$env:JUPYTER_GATEWAY_URL = "https://<your-gateway-host>/gateway"`
+	- `$env:JUPYTER_GATEWAY_AUTH_TOKEN = "<optional-token>"`
 
-環境変数 `PYFLOWS_API_TOKEN` を設定すると、保護エンドポイントでトークンが必須になります。
-- HTTP: `Authorization: Bearer <token>` もしくは `X-API-Token: <token>`
-- WebSocket: `ws://.../ws?token=<token>`（UIは自動で付与）
+- Start the backend after setting the variables. On startup you should see a log like:
+	- `[Kernel] Using Jupyter Gateway: https://<your-gateway-host>/gateway`
 
-## リモートカーネル（Jupyter Enterprise Gateway）
+Notes and tips:
+- Networking: The backend server must be able to reach the gateway over HTTPS and upgrade to WebSockets (for IOPub, etc.). Ensure your Azure Ingress/Load Balancer permits `Upgrade: websocket`.
+- CORS: Not required for the gateway itself, since the backend connects server-to-server. CORS for the frontend is already enabled on this FastAPI app.
+- Dependencies: `jupyter_client>=8` is included and supports the gateway client. No extra package is needed for the client-side integration.
+- Fallback: If the gateway module isn't available at runtime or the URL is not set, the app automatically falls back to a local kernel.
 
-Azure等でEnterprise Gatewayを用意している場合、以下を設定するとリモート実行に切り替わります。
-- `$env:JUPYTER_GATEWAY_URL = "https://<host>/gateway"`
-- `$env:JUPYTER_GATEWAY_AUTH_TOKEN = "<optional-token>"`
-設定後に起動すると、ログに `[Kernel] Using Jupyter Gateway: ...` が出力されます。設定が無効/失敗時はローカルカーネルにフォールバックします。
+## Quick Guide (New Features)
 
-ネットワーク注意：WebSocketアップグレード（IOPub）が通るようにLB/Ingressを設定してください。
+- Variable template embedding
+	- In any string field, `${varName}` is replaced with the current kernel global variable `varName`.
+	- Supported examples: pandas.ReadCSV path/dir, inline CSV content, Python FileReadText path/inline, FileWriteCSV path.
 
-## データ保存・永続化
+- Unified expression evaluation
+	- Python-side expressions use `_fp_eval()` which evaluates against kernel globals with optional locals (e.g., `df`).
+	- `python.Math` accepts expressions like `df["a"] + alpha`.
 
-- 既定の保存先: `./data/flows`（環境変数 `PYFLOWS_DATA_DIR` で変更可能）
-- Docker Composeでは `flows_data` ボリュームを `/data/flows` にマウント（永続化）
+- Variables inspector (right pane)
+	- Switch with “Variables” button; shows a MATLAB-like table of Name/Type/Value.
+	- Automatically refreshes after runs. When visible, you can click Variables again to refresh.
 
-## 環境変数（主なもの）
-
-- 機能フラグ
-	- Enable: `$env:PYFLOWS_ENABLE_KERNEL = "1"`
-	- Disable: `$env:PYFLOWS_DISABLE_KERNEL = "1"`
-- 認証: `$env:PYFLOWS_API_TOKEN = "<token>"`
-- エクスポート上限行: `$env:PYFLOWS_EXPORT_MAX_ROWS = "200000"`
-- 実行タイムアウト（秒）: `$env:PYFLOWS_EXEC_TIMEOUT = "0"`（>0で有効、timeout時は割り込み）
-- タイムアウト後に自動再起動: `$env:PYFLOWS_TIMEOUT_RESTART = "1"`
-- フロー保存先: `$env:PYFLOWS_DATA_DIR = "C:\\path\\to\\flows"`
-
-`.env.example` を参考に設定ファイルを用意し、Dockerや起動スクリプトから読み込ませることができます。
-
-## クラウドへのデプロイ（概要）
-
-コンテナ対応済み（`Dockerfile`）。
-- Render.com/Railway: `deploy/render.yaml` 参照
-- Azure Container Apps / AKS: 任意のレジストリへpushしてデプロイ。`PORT` を尊重します。
-- 永続化: `/data/flows` をボリュームマウント
-- セキュリティ: `PYFLOWS_API_TOKEN` を設定し、私設ネットワーク/認証の背後に配置
-
-将来の有償Webアプリ化に向けたガイドは `docs/commercialization.md` を参照（ドラフト）。
-
-## ヒント/既知の制限
-
-- 既定のプレビューは「Plots」のみです。「All」にするとDataFrameのHEAD/DESCRIBEもストリーム表示されます。
-- 大きなDataFrameは変数パネルのCSVダウンロードやプレビュー（列フィルタ）を活用してください。
-- カーネルは1プロセスです（複数同時実行やマルチユーザーは未対応）。
-
+- Global variables
+	- `python.SetGlobal`: assign multiple lines `name = expr`.
+	- `python.GetGlobal`: import a chosen global into the flow as a DataFrame row.
+	- Most forms include a “Load Variables” helper to click-insert variable names.
