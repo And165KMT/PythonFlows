@@ -3,81 +3,23 @@
 import { PH } from './shared.js';
 
 export function register(reg){
-  // ReadParquet
-  reg.node({
-    id: 'pandas.ReadParquet', title: 'ReadParquet',
-  category: 'IO',
-    inputType: 'None', outputType: 'DataFrame',
-    defaultParams: { mode:'path', path:'', upload:'' },
-    form(node){ const v=node.params||(node.params={mode:'path', path:'', upload:''}); return `
-      <label>Source</label>
-      <select name="mode">
-        <option value="path" ${v.mode==='path'?'selected':''}>file path</option>
-        <option value="upload" ${v.mode==='upload'?'selected':''}>upload (to server)</option>
-      </select>
-      <label>${v.mode==='path'?'Path':'Upload'}</label>
-      ${v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.parquet" style="flex:1"><button class="choose-file" title="choose file">File...</button></div>` : `<div style="display:flex; gap:6px"><input name="upload" value="${v.upload||''}" placeholder="Uploaded filename.parquet" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div>`}
-    `; },
-    code(node){ const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); const seg=[]; if(node.params.mode==='upload' && node.params.upload){ seg.push(`${v} = pd.read_parquet(_fp_render(r'''${node.params.upload}'''))`);} else { seg.push(`${v} = pd.read_parquet(_fp_render(r'''${node.params.path||''}'''))`);} seg.push(`print(${v}.head().to_string())`); return seg; }
-  });
-
-  // ReadExcel
-  reg.node({
-    id: 'pandas.ReadExcel', title: 'ReadExcel',
-  category: 'IO',
-    inputType: 'None', outputType: 'DataFrame',
-    defaultParams: { mode:'path', path:'', upload:'', sheet:'' },
-    form(node){ const v=node.params||(node.params={mode:'path', path:'', upload:'', sheet:''}); return `
-      <label>Source</label>
-      <select name="mode">
-        <option value="path" ${v.mode==='path'?'selected':''}>file path</option>
-        <option value="upload" ${v.mode==='upload'?'selected':''}>upload (to server)</option>
-      </select>
-      <label>${v.mode==='path'?'Path':'Upload'}</label>
-      ${v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.xlsx" style="flex:1"><button class="choose-file" title="choose file">File...</button></div>` : `<div style="display:flex; gap:6px"><input name="upload" value="${v.upload||''}" placeholder="Uploaded filename.xlsx" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div>`}
-      <label>sheet</label><input name="sheet" value="${v.sheet||''}" placeholder="(optional)">
-    `; },
-    code(node){ const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,''); const path = node.params.mode==='upload' ? (node.params.upload||'') : (node.params.path||''); const sheet = (node.params.sheet||'').replace(/`/g,''); const seg=[]; if(sheet){ seg.push(`${v} = pd.read_excel(_fp_render(r'''${path}'''), sheet_name=r'''${sheet}''')`);} else { seg.push(`${v} = pd.read_excel(_fp_render(r'''${path}'''))`);} seg.push(`print(${v}.head().to_string())`); return seg; }
-  });
-
-  // WriteParquet
-  reg.node({
-    id: 'pandas.WriteParquet', title: 'WriteParquet',
-  category: 'IO',
-    inputType: 'DataFrame', outputType: 'DataFrame',
-    defaultParams: { path:'output.parquet' },
-    form(node){ const v=node.params||(node.params={path:'output.parquet'}); return `<label>path</label><input name="path" value="${v.path||'output.parquet'}" placeholder="C:\\data\\out.parquet">`; },
-    code(node, ctx){ const src=ctx.srcVar(node); const path=(node.params.path||'output.parquet'); return [`${src}.to_parquet(_fp_render(r'''${path}'''))`, `print('wrote parquet:', _fp_render(r'''${path}'''))`, `print(${src}.head().to_string())`]; }
-  });
-
-  // WriteExcel
-  reg.node({
-    id: 'pandas.WriteExcel', title: 'WriteExcel',
-  category: 'IO',
-    inputType: 'DataFrame', outputType: 'DataFrame',
-    defaultParams: { path:'output.xlsx', sheet:'Sheet1' },
-    form(node){ const v=node.params||(node.params={path:'output.xlsx', sheet:'Sheet1'}); return `<label>path</label><input name="path" value="${v.path||'output.xlsx'}" placeholder="C:\\data\\out.xlsx"><label>sheet</label><input name="sheet" value="${v.sheet||'Sheet1'}">`; },
-    code(node, ctx){ const src=ctx.srcVar(node); const path=(node.params.path||'output.xlsx'); const sheet=(node.params.sheet||'Sheet1').replace(/`/g,''); return [`${src}.to_excel(_fp_render(r'''${path}'''), sheet_name=r'''${sheet}''', index=False)`, `print('wrote excel:', _fp_render(r'''${path}'''))`, `print(${src}.head().to_string())`]; }
-  });
   // ReadCSV
   reg.node({
   id: 'pandas.ReadCSV', title: 'ReadCSV',
-  category: 'IO',
   inputType: 'None',
   outputType: 'DataFrame',
-    defaultParams: { mode:'inline', path:'', dir:'', inline:`city,temp\nTokyo,30\nOsaka,31\nNagoya,29\n`, upload:'' },
+    defaultParams: { mode:'inline', path:'', dir:'', inline:`city,temp\nTokyo,30\nOsaka,31\nNagoya,29\n` },
     form(node, ui){
-      const v = node.params || (node.params = { mode:'inline', path:'', dir:'', inline:'', upload:'' });
+      const v = node.params || (node.params = { mode:'inline', path:'', dir:'', inline:'' });
       return `
         <label>Source</label>
         <select name="mode">
           <option value="inline" ${v.mode==='inline'?'selected':''}>inline</option>
           <option value="path" ${v.mode==='path'?'selected':''}>file path</option>
-          <option value="upload" ${v.mode==='upload'?'selected':''}>upload (to server)</option>
           <option value="folder" ${v.mode==='folder'?'selected':''}>folder (all CSV)</option>
         </select>
-        <label>${v.mode==='inline'?'CSV': (v.mode==='path'?'Path': (v.mode==='upload'?'Upload':'Folder'))}</label>
-    ${v.mode==='inline' ? `<textarea name="inline">${v.inline}</textarea>` : (v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.csv" style="flex:1"><button class="choose-file" title="choose file">File...</button></div>` : (v.mode==='upload' ? `<div style="display:flex; gap:6px"><input name="upload" value="${v.upload||''}" placeholder="Uploaded filename.csv" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div>` : `<div style="display:flex; gap:6px"><input name="dir" value="${v.dir}" placeholder="C:\\data\\folder" style="flex:1"><button class="choose-folder" title="choose folder">Folder...</button></div>`)) }
+        <label>${v.mode==='inline'?'CSV': (v.mode==='path'?'Path':'Folder')}</label>
+    ${v.mode==='inline' ? `<textarea name="inline">${v.inline}</textarea>` : (v.mode==='path' ? `<div style="display:flex; gap:6px"><input name="path" value="${v.path}" placeholder="C:\\data\\file.csv" style="flex:1"><button class="choose-file" title="choose file">File...</button></div>` : `<div style="display:flex; gap:6px"><input name="dir" value="${v.dir}" placeholder="C:\\data\\folder" style="flex:1"><button class="choose-folder" title="choose folder">Folder...</button></div>`) }
         <div class="folder-info" style="font-size:12px; color:#9ba3af; margin-top:4px"></div>
       `;
     },
@@ -85,10 +27,6 @@ export function register(reg){
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const seg=[];
       if(node.params.mode==='path' && node.params.path){ seg.push(`${v} = pd.read_csv(_fp_render(r'''${node.params.path}'''))`); }
-      else if(node.params.mode==='upload' && node.params.upload){
-        // files saved under data/uploads; backend returns absolute path but we can also resolve relative
-        seg.push(`${v} = pd.read_csv(_fp_render(r'''${node.params.upload}'''))`);
-      }
       else if(node.params.mode==='folder' && node.params.dir){
         seg.push(`_dir = _fp_render(r'''${node.params.dir}''')`);
         seg.push(`_files = sorted(glob.glob(_dir+('/' if not _dir.endswith('/') else '')+'*.csv'))`);
@@ -107,7 +45,6 @@ export function register(reg){
   // XYPlot (line/scatter/area/hexbin)
   reg.node({
     id: 'pandas.XYPlot', title: 'XYPlot',
-  category: 'Plot',
     inputType: 'DataFrame',
     outputType: 'Figure',
     defaultParams: {
@@ -214,7 +151,6 @@ export function register(reg){
   // BarPlot (categorical x vs numeric y)
   reg.node({
     id: 'pandas.BarPlot', title: 'BarPlot',
-  category: 'Plot',
     inputType: 'DataFrame',
     outputType: 'Figure',
     defaultParams: {
@@ -286,7 +222,6 @@ export function register(reg){
   // DistributionPlot (hist/kde/box)
   reg.node({
     id: 'pandas.DistributionPlot', title: 'DistributionPlot',
-  category: 'Plot',
     inputType: 'DataFrame',
     outputType: 'Figure',
     defaultParams: {
@@ -374,7 +309,6 @@ export function register(reg){
   // SelectColumns
   reg.node({
   id: 'pandas.SelectColumns', title:'SelectColumns',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { columns:'city,temp' },
@@ -393,7 +327,6 @@ export function register(reg){
   // FilterRows
   reg.node({
   id: 'pandas.FilterRows', title:'FilterRows',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { expr:'temp >= 30' },
@@ -404,7 +337,6 @@ export function register(reg){
   // GroupByAggregate
   reg.node({
   id: 'pandas.GroupByAggregate', title:'GroupByAggregate',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { by:'city', value:'temp', func:'mean' },
@@ -669,7 +601,6 @@ except Exception as _e:
   // CorrHeatmap
   reg.node({
   id: 'pandas.CorrHeatmap', title: 'CorrHeatmap',
-  category: 'Plot',
   inputType: 'DataFrame',
   outputType: 'Figure',
     defaultParams: { method:'pearson', cmap:'coolwarm', annot:true, figsizeW:'6', figsizeH:'4', dpi:'100' },
@@ -712,7 +643,6 @@ except Exception as _e:
   // SortValues
   reg.node({
   id: 'pandas.SortValues', title:'Sort',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { by:'', ascending:true },
@@ -739,7 +669,6 @@ except Exception as _e:
   // RenameColumns
   reg.node({
   id: 'pandas.RenameColumns', title:'Rename',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { mapping:'' },
@@ -770,7 +699,6 @@ except Exception as _e:
   // DropNA
   reg.node({
   id: 'pandas.DropNA', title:'DropNA',
-  category: 'Clean',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { subset:'', how:'any' },
@@ -791,7 +719,6 @@ except Exception as _e:
   // FillNA
   reg.node({
   id: 'pandas.FillNA', title:'FillNA',
-  category: 'Clean',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { column:'', value:'' },
@@ -818,73 +745,9 @@ except Exception as _e:
     }
   });
 
-  // Concat (multi-input)
-  reg.node({
-  id: 'pandas.Concat', title:'Concat',
-  category: 'Transform',
-  inputType: 'DataFrame',
-  outputType: 'DataFrame',
-    defaultParams: { axis:'0', ignore_index:true },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>axis</label><select name="axis"><option value="0" ${String(v.axis||'0')==='0'?'selected':''}>rows (0)</option><option value="1" ${String(v.axis)==='1'?'selected':''}>columns (1)</option></select>
-      <label>ignore_index (axis=0)</label><select name="ignore_index"><option value="true" ${String(v.ignore_index)!=='false'?'selected':''}>true</option><option value="false" ${String(v.ignore_index)==='false'?'selected':''}>false</option></select>
-    `; },
-    code(node, ctx){
-      const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const axis = parseInt(node.params?.axis||'0')||0;
-      const ign = String(node.params?.ignore_index) !== 'false';
-      const srcs = (typeof ctx.srcVars==='function' ? ctx.srcVars(node) : []);
-      const src = (typeof ctx.srcVar==='function' ? ctx.srcVar(node) : null);
-      const lines=[];
-      if(srcs && srcs.length>=2){
-        // Concatenate multiple upstream DataFrames
-        const listExpr = '[' + srcs.join(', ') + ']';
-        if(axis===0){
-          lines.push(`${v} = pd.concat(${listExpr}, axis=0, ignore_index=${ign?'True':'False'})`);
-        } else {
-          lines.push(`${v} = pd.concat(${listExpr}, axis=1)`);
-        }
-      } else if(src){
-        // Single input: passthrough
-        lines.push(`${v} = ${src}`);
-      } else {
-        // No inputs: empty DataFrame
-        lines.push(`${v} = pd.DataFrame()`);
-      }
-      lines.push(`print(${v}.head().to_string())`);
-      return lines;
-    }
-  });
-
-  // Describe
-  reg.node({
-  id: 'pandas.Describe', title:'Describe',
-  category: 'Explore',
-  inputType: 'DataFrame',
-  outputType: 'DataFrame',
-    defaultParams: { include:'auto', percentiles:'' },
-    form(node){ const v=node.params||(node.params={}); return `
-      <label>include</label><select name="include"><option value="auto" ${String(v.include||'auto')==='auto'?'selected':''}>auto (numeric)</option><option value="all" ${String(v.include)==='all'?'selected':''}>all</option><option value="number" ${String(v.include)==='number'?'selected':''}>number</option></select>
-      <label>percentiles (comma, e.g. 0.25,0.75)</label><input name="percentiles" value="${v.percentiles||''}" placeholder="0.05,0.95">
-    `; },
-    code(node, ctx){
-      const src=ctx.srcVar(node); const v='v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const inc = String(node.params?.include||'auto');
-      const pct = String(node.params?.percentiles||'').trim();
-      const pList = pct? '[' + pct.split(',').map(s=> s.trim()).filter(Boolean).map(s=> parseFloat(s)).filter(x=> !isNaN(x)).join(', ') + ']' : 'None';
-      const includeArg = inc==='auto' ? "None" : (inc==='all'? "'all'" : "'number'");
-      return [
-        `${v} = ${src}.describe(include=${includeArg}${pct? `, percentiles=${pList}`:''})`,
-        `${v} = ${v}.reset_index().rename(columns={'index':'stat'})`,
-        `print(${v}.to_string())`
-      ];
-    }
-  });
-
   // Head/Tail
   reg.node({
   id: 'pandas.HeadTail', title:'Head/Tail',
-  category: 'Explore',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { mode:'head', n:'5' },
@@ -898,7 +761,6 @@ except Exception as _e:
   // ValueCounts
   reg.node({
   id: 'pandas.ValueCounts', title:'ValueCounts',
-  category: 'Explore',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { column:'' },
@@ -916,7 +778,6 @@ except Exception as _e:
   // PivotTable
   reg.node({
   id: 'pandas.PivotTable', title:'PivotTable',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { index:'', columns:'', values:'', aggfunc:'mean', fill_value:'' },
@@ -952,7 +813,6 @@ except Exception as _e:
   // Melt
   reg.node({
   id: 'pandas.Melt', title:'Melt',
-  category: 'Reshape',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { id_vars:'', value_vars:'', var_name:'variable', value_name:'value' },
@@ -975,7 +835,6 @@ except Exception as _e:
   // AddColumn (assign via eval expression)
   reg.node({
   id: 'pandas.AddColumn', title:'AddColumn',
-  category: 'Transform',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { newcol:'new', expr:'' },
@@ -995,7 +854,6 @@ except Exception as _e:
   // Merge (integrate/join with another DataFrame)
   reg.node({
   id: 'pandas.Merge', title: 'Merge',
-  category: 'Join',
   inputType: 'DataFrame',
   outputType: 'DataFrame',
     defaultParams: { how: 'inner', on: '', left_on: '', right_on: '', with: 'global', rhs: 'df2', path: '' },

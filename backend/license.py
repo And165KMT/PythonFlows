@@ -1,8 +1,7 @@
 import os
-from typing import Optional
 
 
-def verify_license_for_feature(feature: str, key: Optional[str]) -> bool:
+def verify_license_for_feature(feature: str, key: str | None) -> bool:
     """
     Placeholder license verification.
     - Returns True only if PYFLOWS_LICENSE_ALLOW='1' (for development/testing),

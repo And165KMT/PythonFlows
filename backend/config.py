@@ -1,9 +1,8 @@
 import os
-from typing import Optional
 from .license import verify_license_for_feature
 
 
-def _truthy(val: Optional[str]) -> bool:
+def _truthy(val: str | None) -> bool:
     if val is None:
         return False
     return val.strip().lower() in {"1", "true", "yes", "on"}
@@ -26,37 +25,3 @@ def kernel_feature_enabled() -> bool:
     if key and verify_license_for_feature("kernel", key):
         return True
     return False
-
-
-# --- New configuration helpers (backward compatible) ---
-def get_api_token() -> Optional[str]:
-    """Return API token if set; when set, auth becomes required for protected endpoints."""
-    tok = os.environ.get("PYFLOWS_API_TOKEN")
-    return tok.strip() if tok else None
-
-
-def auth_required() -> bool:
-    return bool(get_api_token())
-
-
-def exec_timeout_seconds() -> int:
-    """Max seconds to allow a /run execution before sending an interrupt (0 = disabled)."""
-    try:
-        v = int(os.environ.get("PYFLOWS_EXEC_TIMEOUT", "0").strip())
-        return max(0, v)
-    except Exception:
-        return 0
-
-
-def export_max_rows_default() -> int:
-    """Default max rows for CSV export if not specified by query."""
-    try:
-        v = int(os.environ.get("PYFLOWS_EXPORT_MAX_ROWS", "200000").strip())
-        return max(1, v)
-    except Exception:
-        return 200000
-
-
-def timeout_restart_enabled() -> bool:
-    """If true, after interrupting on timeout we will restart the kernel."""
-    return _truthy(os.environ.get("PYFLOWS_TIMEOUT_RESTART"))
