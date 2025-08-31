@@ -20,6 +20,106 @@ export const state = {
 
 export const registry = { packages: [], nodes: new Map(), byPackage: new Map() };
 
+// Build a dynamic node definition from an autogen spec
+// Spec shape: { id, title, category, inputType, outputType, params:[{name, default, ui, hidden?, advanced?, when?}],
+//   pkg, call:{ target, kind:'function'|'constructor'|'method', receiver:string|null, dfParam:string|null, returnsSelf?:boolean } }
+export function makeAutogenDef(spec){
+  const id = spec.id || `autogen.${Math.random().toString(36).slice(2,8)}`;
+  const def = {
+    id,
+    title: spec.title || id,
+    category: spec.category || 'Auto',
+    inputType: spec.inputType || 'Any',
+    outputType: spec.outputType || 'Any',
+    defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
+    form(node){
+      const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
+      const fields = (spec.params||[]).filter(p=> !p.hidden);
+      function shown(p){ if(!p.when) return true; const m = String(p.when).split('='); if(m.length!==2) return true; const [k,val] = m; return String(v[k]||'')===String(val); }
+      function inputFor(p){
+        const name = p.name; const label = p.label||name; const val = v[name] ?? p.default ?? '';
+        const ui = String(p.ui||'string').toLowerCase();
+        if(ui==='select' && Array.isArray(p.enum)){
+          const opts = p.enum.map(x=> `<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join('');
+          return `<label>${label}</label><select name="${name}">${opts}</select>`;
+        }
+        if(ui==='bool'){
+          const on = String(val)==='true' || val===true; return `<label>${label}</label><select name="${name}"><option value="false" ${!on?'selected':''}>false</option><option value="true" ${on?'selected':''}>true</option></select>`;
+        }
+        if(ui==='number'){
+          const num = (val===null||val===undefined)? '' : String(val); return `<label>${label}</label><input type="number" step="any" name="${name}" value="${num}">`;
+        }
+        if(ui==='textarea'){
+          return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`;
+        }
+        if(ui==='upload'){
+          return `<label>${label}</label><div style="display:flex; gap:6px"><input name="${name}" value="${val||''}" placeholder="Uploaded filename" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div>`;
+        }
+        return `<label>${label}</label><input name="${name}" value="${val||''}">`;
+      }
+      const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
+      const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
+      const desc = spec.desc ? `<div class="desc">${String(spec.desc).replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</div>` : '';
+      return `${desc}${basic}${adv? `<details style=\"margin-top:8px\"><summary style=\"cursor:pointer; user-select:none\">Advanced</summary>${adv}</details>`:''}`;
+    },
+    code(node, ctx){
+      const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+      const p = node.params||{};
+      const call = spec.call || {};
+      const params = Array.isArray(spec.params)? spec.params : [];
+      const src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || null) : null;
+      const srcs = (ctx && typeof ctx.srcVars==='function') ? (ctx.srcVars(node) || []) : (src? [src] : []);
+      const provided = new Set(Object.keys(p||{}).filter(k=> p[k]!==undefined));
+      const activeParams = params.filter(x=> (!x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||'')));
+      const kwargs = activeParams
+        .filter(x=> p[x.name]!==undefined && x.name!=='mode' && x.name!=='inline' && x.name!=='path' && x.name!=='upload' && x.name!=='dir')
+        .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`);
+      const addKw = (k, expr)=>{ const key = String(k||''); if(key && !provided.has(key)) kwargs.unshift(`${key}=${expr}`); };
+      const target = call.target || 'None';
+      const parts = String(target).split('.');
+      const root = parts[0] || '';
+      const modPath = parts.slice(0, -1).join('.');
+      const kind = call.kind || 'function';
+      const dfParam = call.dfParam || null;
+      const srcParams = Array.isArray(call.srcParams) ? call.srcParams : (dfParam? [dfParam] : []);
+      const seg = [];
+      if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
+      if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
+      if(kind==='method'){
+        const meth = parts[parts.length-1] || '';
+        const recv = srcs[0] || src || 'None';
+        const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
+        const argz = [];
+        if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
+        if(kwargs.length) argz.push(...kwargs);
+        const joined = argz.join(', ');
+        if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${kwargs.join(', ')})`);
+        else seg.push(`${v} = ${recv}.${meth}(${joined})`);
+        if(call.returnsSelf) seg.push(`${v} = ${recv}`);
+      } else if(kind==='constructor'){
+        seg.push(`${v} = ${target}(${kwargs.join(', ')})`);
+      } else { // function
+        // Map multiple upstreams to srcParams when provided
+        if(srcs && srcs.length){
+          for(let i=0; i<Math.min(srcs.length, srcParams.length); i++){
+            const k = srcParams[i]; const s = srcs[i]; if(k){ addKw(k, String(s)); }
+          }
+          // If dfParam defined but not in srcParams and still not provided, map first src
+          if(dfParam && !srcParams.includes(dfParam) && srcs[0]) addKw(dfParam, String(srcs[0]));
+        } else if(src && dfParam){
+          addKw(dfParam, String(src));
+        } else if(src){
+          const names = activeParams.map(x=> x.name); const want = names[0] || null; if(want && !provided.has(want)) addKw(want, String(src));
+        }
+        seg.push(`${v} = ${target}(${kwargs.join(', ')})`);
+      }
+      seg.push(`print(${v})`);
+      return seg;
+    }
+  };
+  return def;
+}
+
 export function uid(){ return 'n' + (state.nextId++); }
 export function getNode(id){ return state.nodes.find(n => n.id === id); }
 export function getNodes(ids){ const S = new Set(ids||[]); return state.nodes.filter(n=> S.has(n.id)); }

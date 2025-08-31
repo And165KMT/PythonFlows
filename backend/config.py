@@ -88,3 +88,12 @@ def upload_max_mb_default() -> int:
         return v
     except Exception:
         return 0
+
+
+def pip_timeout_seconds() -> int:
+    """Max seconds to wait for 'pip install' to complete (server-side)."""
+    try:
+        v = int(os.environ.get("PYFLOWS_PIP_TIMEOUT", "300").strip())
+        return max(5, v)
+    except Exception:
+        return 300

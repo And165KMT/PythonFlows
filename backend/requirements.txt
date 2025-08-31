@@ -10,3 +10,4 @@ scikit-learn
 pyarrow
 openpyxl
 pydantic>=1.10
+python-dotenv

@@ -62,6 +62,16 @@ try:
     print(f"[import] ${alias ? alias : pkg} version: {_ver}")
   except Exception:
     pass
+  # Track import metadata for reproducibility and UI (/api/imports)
+  try:
+    __pf_imports = globals().get('__pf_imports', {})
+    __pf_imports[_mod_name] = {
+      'alias': (r'''${alias}''' or (_mod_name if ${setG ? 'True' : 'False'} else None)),
+  'version': (str(_ver) if (_ver is not None) else None)
+    }
+    globals()['__pf_imports'] = __pf_imports
+  except Exception:
+    pass
   # Magic marker to let UI auto-generate nodes for this module
   try:
     print(f"[[INTROSPECT_MODULE:{_mod_name}]]")

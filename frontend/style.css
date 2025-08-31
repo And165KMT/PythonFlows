@@ -45,6 +45,7 @@ header h1 { margin: 0; font-size: 18px; }
 .node .type { font-size:12px; color:var(--sub); }
 .node .title { font-weight:600; }
 .node .body { padding:8px 10px; display:flex; flex-direction:column; gap:6px; }
+.node .desc { font-size: 12px; color: var(--sub); margin-bottom: 6px; opacity: 0.9; }
 .node label { font-size:12px; color:var(--sub); }
 .node input, .node select, .node textarea { width:100%; background:#0b1018; color:var(--text); border:1px solid #2a3445; border-radius:6px; padding:6px; font-size:12px; }
 .node textarea { height:70px; font-family: ui-monospace, Consolas, monospace; }

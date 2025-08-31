@@ -1,290 +1,260 @@
 // UI and rendering for FlowPython
 import { state, registry, getNode, addNode, selectNode, clearSelection, deleteNodeById, uid, computeUpstreamColumns, suggestionsForNode, genCode, genCodeUpTo, loadPackages, setPreviewModeProvider, upstreamOf, setSelection, addToSelection, removeFromSelection, isSelected, saveToLocal, restoreFromLocal, makeSubgraph, pasteSubgraph, deleteNodes, createGroup, getGroup, genCodeForNodes } from './nodes.js';
 import { injectBaseStyles, styleTableHtml as styleTableHtmlUtil, escapeHtml as escapeHtmlUtil } from './utils.js';
+import { appendLog, clearLog } from './logger.js';
+import { sanitizePython } from './python.js';
+import { ensureRunBar as ensureRunBarMod, ensureActionsArea as ensureActionsAreaMod } from './actions.js';
 import { drawEdges as drawEdgesMod, syncEdgesViewport as syncEdgesViewportMod, setGhost as setGhostMod, clearGhost as clearGhostMod } from './edges.js';
 import { updateNodePreview as updateNodePreviewMod, isFigureNode as isFigureNodeMod, getPreviewMode as getPreviewModeMod } from './preview.js';
 import { bindForm as bindFormMod } from './forms.js';
+import { initWS } from './ws.js';
 import { openContextMenu, closeContextMenu } from './contextmenu.js';
 import { initInteractions as initInteractionsMod } from './interactions.js';
 import { openQuickAdd as openQuickAddMod, closeQuickAdd as closeQuickAddMod } from './quickadd.js';
 
+// ——— Lightweight adapters/wrappers for clarity and local usage ———
 // Treat any node whose outputType is 'Figure' as a plot node (delegated)
 function isFigureNode(n){ return isFigureNodeMod(n, registry); }
+// Preview mode helper bound to the UI select element
+function getPreviewMode(){ try{ return getPreviewModeMod(previewModeEl); }catch{ return 'plots'; } }
+// Unify helper names used throughout this file
+const escapeHtml = (s)=> escapeHtmlUtil(s);
+const styleTableHtml = (html)=> styleTableHtmlUtil(html);
+
+// ——— DOM refs and runtime flags ———
+const toolbarEl = document.getElementById('toolbar');
+const statusEl = document.getElementById('status');
+const previewModeEl = document.getElementById('previewMode');
+const genCodeEl = document.getElementById('genCode');
+const rightCode = document.getElementById('rightCode');
+const rightVars = document.getElementById('rightVars');
+const rightPkgs = document.getElementById('rightPkgs');
+const varsWrap = document.getElementById('varsWrap');
+const pkgsWrap = document.getElementById('pkgsWrap');
+const tabCode = document.getElementById('tabCode');
+const tabVars = document.getElementById('tabVars');
+const tabPkgs = document.getElementById('tabPkgs');
+let subsystemsEl = null;
+let groupsLayer = null;
+let lastMouseWorld = { x: 100, y: 100 };
+let authRequired = false;
+let authToken = null;
+let kernelDisabled = false;
+let runningLock = false;
+let globalRunBtn = null;
+let wsCtl = null;
+
+// ——— helpers: auth token + fetch wrapper ———
+function getStoredToken(){ try{ return sessionStorage.getItem('pf_token') || null; }catch{ return null; } }
+function setStoredToken(v){ try{ if(v) sessionStorage.setItem('pf_token', v); else sessionStorage.removeItem('pf_token'); authToken = v || null; }catch{} }
+async function apiFetch(url, opts){
+  const headers = Object.assign({}, (opts && opts.headers) || {});
+  if(authRequired && authToken){ headers['Authorization'] = 'Bearer ' + authToken; }
+  const next = Object.assign({}, opts || {}, { headers });
+  return fetch(url, next);
+}
+
+// ——— run buttons state management ———
+function canRun(){
+  if(kernelDisabled) return false;
+  if(runningLock) return false;
+  try{ const ws = wsCtl && wsCtl.getWS ? wsCtl.getWS() : null; return !!(ws && ws.readyState===1); }catch{ return false; }
+}
+function updateRunButtonsState(){
+  const ok = canRun();
+  try{ if(globalRunBtn) globalRunBtn.disabled = !ok; }catch{}
+  try{ document.querySelectorAll('.node-run').forEach(b=>{ b.disabled = !ok; }); }catch{}
+}
+async function runWithBusy(fn, btn, busyLabel='Running...'){
+  if(kernelDisabled){ appendLog('[kernel] feature disabled'); return; }
+  runningLock = true; updateRunButtonsState();
+  const oldTxt = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = busyLabel; }
+  try{ if(wsCtl && wsCtl.setPendingVarsRefresh) wsCtl.setPendingVarsRefresh(true); await fn(); }
+  finally { runningLock = false; updateRunButtonsState(); if(btn){ btn.disabled = false; btn.textContent = oldTxt; } }
+}
+
+// ——— small wrappers for modularized helpers ———
+function ensureRunBar(){ try{ ensureRunBarMod(globalRunBtn); }catch{} }
+function ensureActionsArea(){ try{ ensureActionsAreaMod(); }catch{} }
+
+// Minimal UI helpers used in this file
+function openMessageModal(title, message){
+  try{
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const modal = document.createElement('div'); modal.className='modal'; modal.style.maxWidth='720px';
+    modal.innerHTML = `<div class="modal-head"><div class="title">${escapeHtml(title||'Message')}</div></div>
+      <div class="modal-body"><pre style="margin:0; white-space:pre-wrap">${escapeHtml(String(typeof message==='string'? message: JSON.stringify(message, null, 2)))}</pre></div>
+      <div class="modal-foot"><button class="secondary">Close</button></div>`;
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    modal.querySelector('button').addEventListener('click', ()=> overlay.remove());
+    overlay.addEventListener('click', (e)=>{ if(e.target===overlay) overlay.remove(); });
+  }catch{}
+}
+function openGridModal(title, columns, rows){
+  try{
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const modal = document.createElement('div'); modal.className='modal'; modal.style.maxWidth='960px'; modal.style.maxHeight='80vh'; modal.style.overflow='auto';
+    const thead = `<thead><tr>${(columns||[]).map(c=> `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">${escapeHtml(String(c))}</th>`).join('')}</tr></thead>`;
+    const tbody = `<tbody>${(rows||[]).map(r=> `<tr>${(r||[]).map(v=> `<td style=\"padding:6px 8px; border-bottom:1px solid #111824\">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</tbody>`;
+    modal.innerHTML = `<div class="modal-head"><div class="title">${escapeHtml(title||'Grid')}</div></div><div class="modal-body"><div style="overflow:auto"><table style="width:100%; border-collapse:collapse; font-size:12px">${thead}${tbody}</table></div></div><div class="modal-foot"><button class="secondary">Close</button></div>`;
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    modal.querySelector('button').addEventListener('click', ()=> overlay.remove());
+    overlay.addEventListener('click', (e)=>{ if(e.target===overlay) overlay.remove(); });
+  }catch{}
+}
+async function openVarPreview(name){
+  try{
+    const res = await apiFetch(`/api/variables/${encodeURIComponent(name)}/head?rows=50`);
+    const js = await res.json().catch(()=>({}));
+    if(js && js.columns && js.data){ openGridModal(`${name} • head`, js.columns, js.data); }
+    else openMessageModal('preview', JSON.stringify(js));
+  }catch{ openMessageModal('preview', 'failed'); }
+}
+async function downloadFrom(url, filename){
+  try{
+    const res = await apiFetch(url);
+    const blob = await res.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename || 'download'; a.click(); URL.revokeObjectURL(a.href);
+  }catch{ appendLog('[download] failed'); }
+}
+function openZoomOverlay(src){
+  try{
+    const overlay = document.createElement('div'); overlay.className='modal-overlay';
+    const img = document.createElement('img'); img.src = src; img.style.maxWidth='90vw'; img.style.maxHeight='90vh'; img.style.display='block'; img.style.margin='auto';
+    const wrap = document.createElement('div'); wrap.className='modal-body'; wrap.style.background='transparent'; wrap.style.boxShadow='none'; wrap.appendChild(img);
+    overlay.appendChild(wrap); document.body.appendChild(overlay);
+    overlay.addEventListener('click', ()=> overlay.remove());
+  }catch{}
+}
+function syncFormsToState(){ /* inputs are bound live in forms.js; nothing to do */ }
 
 const canvasWrap = document.getElementById('canvasWrap');
 const nodesEl = document.getElementById('nodes');
 const edgesSvg = document.getElementById('edges');
-const log = document.getElementById('log');
-const genCodeEl = document.getElementById('genCode');
-const statusEl = document.getElementById('status');
-const toolbarEl = document.getElementById('toolbar');
-const rightCode = document.getElementById('rightCode');
-const rightVars = document.getElementById('rightVars');
-const rightPkgs = document.getElementById('rightPkgs');
-const tabCode = document.getElementById('tabCode');
-const tabVars = document.getElementById('tabVars');
-const tabPkgs = document.getElementById('tabPkgs');
-const varsWrap = document.getElementById('varsWrap');
-const pkgsWrap = document.getElementById('pkgsWrap');
-const previewModeEl = document.getElementById('previewMode');
-let subsystemsEl; // created when rendering subsystems
-// selection rectangle state
-let selBoxEl = null; let selecting = false; let selStart = null; let lastSel = [];
-let groupsLayer = null; // layer for subsystem frames inside #nodes
-let lastMouseWorld = { x: 100, y: 100 };
-let isSpaceDown = false; // hold Space for panning
-let panning = false; let panStart = null; let panStartView = null;
-let kernelDisabled = false; // backend gated kernel feature
-let authRequired = false; // backend may require token
-let authToken = null; // API token stored in sessionStorage when set
-
-// Keep edges SVG in sync with canvas size using ResizeObserver
-try{
-  const ro = new ResizeObserver(() => {
-    try{ syncEdgesViewport(); drawEdges(); }catch{}
-  });
-  if(canvasWrap) ro.observe(canvasWrap);
-  window.addEventListener('resize', () => { try{ syncEdgesViewport(); drawEdges(); }catch{} });
-}catch{}
-
-// Auth helpers
-function getStoredToken(){ try{ return sessionStorage.getItem('pf_token'); }catch{ return null; } }
-function setStoredToken(tok){ authToken = tok || null; try{ if(authToken) sessionStorage.setItem('pf_token', authToken); else sessionStorage.removeItem('pf_token'); }catch{} }
-function apiHeaders(extra){ const h = Object.assign({}, extra||{}); if(authRequired && authToken){ h['Authorization'] = 'Bearer ' + authToken; } return h; }
-async function apiFetch(url, opts){ const o = Object.assign({ method:'GET' }, opts||{}); o.headers = apiHeaders(o.headers||{}); return fetch(url, o); }
-
-// inject minimal styles for spinner and group frames
-injectBaseStyles();
-
-// ランボタン有効/無効の集中管理
-let runningLock = false; // 実行中はtrue
-function canRun(){ return !kernelDisabled && ws && ws.readyState===1 && !runningLock; }
-function updateRunButtonsState(){
-  const enabled = canRun();
-    const toggle = (btn) => { if (!btn) return; btn.disabled = !enabled; btn.classList.toggle('btn-busy', !enabled); };
-  // グローバル
-  toggle(globalRunBtn);
-  // ノード
-  document.querySelectorAll('.node .node-run').forEach(toggle);
-  // サブシステム一覧
-  document.querySelectorAll('#subsystems .run-sub').forEach(toggle);
-  // サブシステム枠
-  document.querySelectorAll('.group-frame .actions .run').forEach(toggle);
-}
-
-// Busy-run helper: disable a button, show spinner while async fn runs
-async function runWithBusy(fn, btn, runningLabel){
-  try{
-    // カーネル未接続や実行中は押せない
-    if(!canRun()) { updateRunButtonsState(); return; }
-    // 実行開始: Variables更新をidleで一度だけ行うためのフラグ
-    pendingVarsRefresh = true; 
-    runningLock = true; statusEl.textContent='running...'; updateRunButtonsState();
-    if(btn && btn.classList.contains('btn-busy') === false){
-      const orig = { html: btn.innerHTML, text: btn.textContent };
-      btn.disabled = true; btn.classList.add('btn-busy');
-      const label = (typeof runningLabel==='string' && runningLabel) ? runningLabel : (orig.text||'Running');
-      btn.innerHTML = `<span class="spinner"></span>${label}`;
-      try{ await fn(); }
-  finally{ btn.disabled = false; btn.classList.remove('btn-busy'); btn.innerHTML = orig.html; /* runningLock is released on WS idle */ updateRunButtonsState(); }
-    } else {
-      try{ await fn(); }
-  finally{ /* runningLock is released on WS idle */ updateRunButtonsState(); }
-    }
-  }catch(err){ runningLock = false; updateRunButtonsState(); appendLog('[run] error ' + (err && err.message ? err.message : String(err))); }
-}
-
-// Defensive: fix accidental empty try/except blocks in generated Python
-function sanitizePython(code){
-  try{
-    const lines = String(code||'').split('\n');
-    const needsBlock = (s)=> /^(try:|except\b.*:|else:)$/.test(s.trim());
-    function indentOf(s){ const m = s.match(/^[ \t]*/); return m ? m[0].length : 0; }
-    const out = [];
-    for(let i=0;i<lines.length;i++){
-      const cur = lines[i];
-      out.push(cur);
-      if(needsBlock(cur)){
-        // find next non-empty line
-        let j=i+1; let next=null; while(j<lines.length){ if(lines[j].trim().length){ next=lines[j]; break; } out.push(lines[j]); i=j; j++; }
-        if(next!=null){
-          const a = indentOf(cur);
-          const b = indentOf(next);
-          if(b<=a){ out.push(' '.repeat(a+2) + 'pass'); }
-        } else {
-          // file ended after a try/except/else – add pass
-          const a = indentOf(cur);
-          out.push(' '.repeat(a+2) + 'pass');
-          break;
-        }
-      }
-    }
-    return out.join('\n');
-  }catch{ return code; }
-}
-
-// Sync all visible form inputs into state.node.params (handles focused fields not yet committed)
-function syncFormsToState(){
-  try{
-    document.querySelectorAll('.node').forEach(nodeEl=>{
-      const id = nodeEl.getAttribute('data-node-id');
-      if(!id) return;
-      const node = getNode(id); if(!node) return;
-      node.params = node.params || {};
-      nodeEl.querySelectorAll('.body input, .body select, .body textarea').forEach(inp=>{
-        const name = inp.name || '';
-        if(!name) return;
-        if(inp.tagName === 'SELECT' && inp.multiple){
-          const arr = Array.from(inp.selectedOptions || []).map(o=> o.value || o.text).filter(Boolean);
-          node.params[name] = arr.join(',');
-        } else {
-          node.params[name] = inp.value;
-        }
-      });
+// WebSocket & streaming
+function ensureWS(){
+  if(!wsCtl){
+    const buildUrl = ()=>{ const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; return proto + location.host + '/ws' + tokenQs; };
+    wsCtl = initWS({
+      buildUrl,
+      appendLog,
+      updateRunButtonsState,
+      onKernelDisabled: ()=>{ kernelDisabled = true; statusEl.textContent='kernel disabled'; },
+      onIdle: ()=>{ runningLock=false; statusEl.textContent='idle'; updateRunButtonsState(); },
+      onBusy: ()=>{ runningLock=true; updateRunButtonsState(); },
+      refreshVariables,
+      state,
+      registry,
+      getNode,
+      getPreviewMode,
+      isFigureNode,
+      updateNodePreview: (id)=> updateNodePreview(id),
+      apiFetch,
+      renderToolbar,
+      updatePreviewDock
     });
-  }catch{}
+  }
+  wsCtl.ensureWS();
 }
-
-// Simple image zoom overlay
-function openZoomOverlay(src){
-  try{
-    const ov = document.createElement('div');
-    Object.assign(ov.style, { position:'fixed', inset:'0', background:'rgba(0,0,0,0.7)', zIndex:5000, display:'flex', alignItems:'center', justifyContent:'center' });
-    const img = document.createElement('img'); img.src = src; Object.assign(img.style, { maxWidth:'90%', maxHeight:'90%', boxShadow:'0 10px 30px rgba(0,0,0,0.6)', border:'1px solid #000' });
-    ov.appendChild(img);
-    const close = ()=>{ ov.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
-    ov.addEventListener('click', close);
-    document.addEventListener('keydown', onKey);
-    document.body.appendChild(ov);
-  }catch{}
-}
-
-// Variable preview modal (DataFrame CSV with column filter)
-async function openVarPreview(name){
-  try{
-    const url = `/api/variables/${encodeURIComponent(name)}/export?format=csv`;
-    const res = await apiFetch(url);
-    const text = await res.text();
-    const lines = text.split(/\r?\n/).filter(l=> l.length>0);
-    if(lines.length===0) return;
-    const parseRow = (row)=> row.split(',');
-    const header = parseRow(lines[0]);
-    const rows = lines.slice(1, 201).map(parseRow); // limit to 200 rows
+// Global Run All button setup (create once)
+try{
+  globalRunBtn = document.createElement('button');
+  globalRunBtn.textContent='▶ Run All';
+  Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' });
+  globalRunBtn.addEventListener('click', async ()=>{
+    await runWithBusy(async ()=>{
+      ensureWS(); clearLog(); statusEl.textContent='running...';
+      syncFormsToState();
+      let code = genCode(); code = sanitizePython(code); genCodeEl.textContent = code;
+      const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+      let js={}; try{ js=await res.json(); }catch{}
+      appendLog('Sent exec: ' + JSON.stringify(js));
+    }, globalRunBtn, 'Running...');
+  });
+}catch{}
+async function openPackagePickerModal(){
+  return new Promise(async (resolve)=>{
     const overlay = document.createElement('div'); overlay.className='modal-overlay';
-    const modal = document.createElement('div'); modal.className='modal';
-    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(name)} preview</div><span class="chip">${rows.length.toLocaleString()} rows</span>`;
+    const modal = document.createElement('div'); modal.className='modal'; modal.style.maxWidth='760px';
+    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = '<div class="title">Packages</div>';
     const body = document.createElement('div'); body.className='modal-body';
+    body.innerHTML = `
+      <div style="display:flex; gap:8px; margin-bottom:10px">
+        <input id="pf_pkg_q" class="input" placeholder="Search installed packages (optional)" style="flex:1"/>
+        <button id="pf_pkg_search" class="secondary">Search</button>
+      </div>
+      <div id="pf_pkg_list" style="max-height:360px; overflow:auto; border:1px solid #111824"></div>
+      <div id="pf_pkg_pager" style="margin-top:8px; display:flex; align-items:center; gap:8px">
+        <button id="pf_pkg_prev" class="secondary">Prev</button>
+        <button id="pf_pkg_next" class="secondary">Next</button>
+        <div id="pf_pkg_pageinfo" style="color:#9ba3af; margin-left:auto"></div>
+      </div>
+      <div style="color:#9ba3af; font-size:12px; margin-top:8px">Tip: 空のまま Install を押すと任意のパッケージ名を入力できます</div>`;
     const foot = document.createElement('div'); foot.className='modal-foot';
-    const closeBtn = document.createElement('button'); closeBtn.textContent='Close'; closeBtn.className='secondary';
-    const filterInput = document.createElement('input'); filterInput.className='input'; filterInput.placeholder='列名フィルタ（カンマ区切り、空で全列）'; filterInput.style.flex='1';
-    head.appendChild(document.createElement('div')).style.marginLeft='auto';
-    head.appendChild(filterInput);
-    foot.appendChild(closeBtn);
+    const cancelBtn = document.createElement('button'); cancelBtn.className='secondary'; cancelBtn.textContent='Close';
+    const installBtn = document.createElement('button'); installBtn.textContent='Install custom...';
+    foot.appendChild(cancelBtn); foot.appendChild(installBtn);
     modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
-    const renderTable = (cols)=>{
-      const idx = cols && cols.length ? cols.map(c=> header.indexOf(c)).filter(i=> i>=0) : header.map((_,i)=> i);
-      const th = idx.map(i=> `<th style="text-align:left; border-bottom:1px solid #263041; padding:4px 6px;">${escapeHtml(String(header[i]||''))}</th>`).join('');
-      const trs = rows.map(r=> `<tr>${idx.map(i=> `<td style="padding:4px 6px; border-bottom:1px solid #111824;">${escapeHtml(String(r[i]||''))}</td>`).join('')}</tr>`).join('');
-      body.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:600px; border-collapse:collapse; font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
+    document.body.appendChild(overlay);
+
+    const listEl = body.querySelector('#pf_pkg_list');
+    const qEl = body.querySelector('#pf_pkg_q');
+    const searchBtn = body.querySelector('#pf_pkg_search');
+    const prevBtn = body.querySelector('#pf_pkg_prev');
+    const nextBtn = body.querySelector('#pf_pkg_next');
+    const pageInfo = body.querySelector('#pf_pkg_pageinfo');
+
+    let offset = 0; const limit = 50; let total = 0;
+
+    const render = (items)=>{
+      const rows = (items||[]).map(x=> {
+        const name = String(x.name||'');
+        const nodesCount = (registry.byPackage && registry.byPackage.get(name) ? registry.byPackage.get(name).length : 0) || 0;
+        return `<tr data-name="${escapeHtmlUtil(name)}">
+          <td style="padding:6px 8px; border-bottom:1px solid #111824">${escapeHtmlUtil(name)}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #111824; color:#cbd5e1">${escapeHtmlUtil(x.version||'-')}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #111824; color:#9ba3af">${nodesCount}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #111824"><button class="mini">Install</button></td>
+        </tr>`;
+      }).join('');
+      listEl.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px"><thead><tr>
+        <th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Package</th>
+        <th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Version</th>
+        <th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Nodes</th>
+        <th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Action</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+      listEl.querySelectorAll('button.mini').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const tr = btn.closest('tr'); const name = tr && tr.getAttribute('data-name'); close({ name });
+        });
+      });
+      const page = Math.floor(offset/limit)+1; const pages = Math.max(1, Math.ceil(total/limit));
+      pageInfo.textContent = `${(total||0).toLocaleString()} items • Page ${page}/${pages}`;
+      prevBtn.disabled = offset<=0; nextBtn.disabled = offset+limit>=total;
     };
-    renderTable(null);
-    const applyFilter = ()=>{
-      const raw = String(filterInput.value||'').trim();
-      if(!raw){ renderTable(null); return; }
-      const want = raw.split(',').map(s=> s.trim()).filter(Boolean);
-      renderTable(want);
+    const load = async ()=>{
+      const q = String(qEl.value||'').trim();
+      const usp = new URLSearchParams(); if(q) usp.set('q', q); usp.set('limit', String(limit)); usp.set('offset', String(offset));
+      const js = await (await apiFetch('/api/modules/installed?'+usp.toString())).json().catch(()=>({items:[], total:0}));
+      total = Number(js.total||0); render(js.items||[]);
     };
-    filterInput.addEventListener('change', applyFilter);
-    filterInput.addEventListener('keyup', (e)=>{ if(e.key==='Enter') applyFilter(); });
-    const close = ()=> overlay.remove();
-    closeBtn.addEventListener('click', close);
-    overlay.addEventListener('click', (e)=>{ if(e.target===overlay) close(); });
-    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
-    document.body.appendChild(overlay);
-    setTimeout(()=> filterInput.focus(), 30);
-  }catch(e){ appendLog('[preview] failed to open'); }
+    const goPrev = ()=>{ if(offset<=0) return; offset = Math.max(0, offset - limit); load(); };
+    const goNext = ()=>{ if(offset+limit>=total) return; offset = offset + limit; load(); };
+    searchBtn.onclick = ()=>{ offset=0; load(); };
+    prevBtn.onclick = goPrev; nextBtn.onclick = goNext; qEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ offset=0; load(); } });
+    await load();
+
+    function close(v){ overlay.remove(); resolve(v); }
+    cancelBtn.onclick = ()=> close(undefined);
+    installBtn.onclick = ()=> close({});
+    overlay.addEventListener('click', (e)=>{ if(e.target===overlay) cancelBtn.click(); });
+  });
 }
 
-// Generic grid modal for {columns, data}
-function openGridModal(title, columns, rows){
-  try{
-    const overlay = document.createElement('div'); overlay.className='modal-overlay';
-    const modal = document.createElement('div'); modal.className='modal';
-    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(title||'')}</div><span class="chip">${(Array.isArray(rows)? rows.length:0).toLocaleString()} rows</span>`;
-    const body = document.createElement('div'); body.className='modal-body';
-    const foot = document.createElement('div'); foot.className='modal-foot';
-    const closeBtn = document.createElement('button'); closeBtn.textContent='Close'; closeBtn.className='secondary'; foot.appendChild(closeBtn);
-    modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
-    const th = (columns||[]).map(c=> `<th style="text-align:left; padding:4px 6px; border-bottom:1px solid #263041">${escapeHtml(String(c))}</th>`).join('');
-    const trs = (rows||[]).map(r=> `<tr>${(columns||[]).map((_,i)=> `<td style="padding:4px 6px; border-bottom:1px solid #111824;">${escapeHtml(String((Array.isArray(r)? r[i] : (r && r[i])) ?? ''))}</td>`).join('')}</tr>`).join('');
-    body.innerHTML = `<div style="width:100%; overflow:auto"><table style="min-width:560px; border-collapse:collapse; font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
-    const close = ()=> overlay.remove(); closeBtn.addEventListener('click', close); overlay.addEventListener('click', (e)=>{ if(e.target===overlay) close(); });
-    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
-    document.body.appendChild(overlay);
-  }catch{}
-}
+// (removed orphaned install-stream code)
 
-function openMessageModal(title, message){
-  try{
-    const overlay = document.createElement('div'); overlay.className='modal-overlay';
-    const modal = document.createElement('div'); modal.className='modal';
-    const head = document.createElement('div'); head.className='modal-head'; head.innerHTML = `<div class="title">${escapeHtml(title||'')}</div>`;
-    const body = document.createElement('div'); body.className='modal-body'; body.innerHTML = `<pre style="white-space:pre-wrap; margin:0">${escapeHtml(String(message||''))}</pre>`;
-    const foot = document.createElement('div'); foot.className='modal-foot'; const b=document.createElement('button'); b.className='secondary'; b.textContent='Close'; foot.appendChild(b);
-    modal.appendChild(head); modal.appendChild(body); modal.appendChild(foot); overlay.appendChild(modal);
-    const close=()=> overlay.remove(); b.addEventListener('click', close); overlay.addEventListener('click',(e)=>{ if(e.target===overlay) close(); });
-    window.addEventListener('keydown', function onk(e){ if(e.key==='Escape'){ close(); window.removeEventListener('keydown', onk); } });
-    document.body.appendChild(overlay);
-  }catch{}
-}
-
-async function downloadFrom(url, fallbackName){
-  try{
-    const res = await apiFetch(url);
-    if(!res.ok){ try{ const j=await res.json(); appendLog('[download] error '+JSON.stringify(j)); }catch{ appendLog('[download] error '+res.status); } return; }
-    const blob = await res.blob();
-    let name = fallbackName || 'download';
-    try{ const cd = res.headers.get('content-disposition')||''; const m = cd.match(/filename\s*=\s*([^;]+)/i); if(m){ name = m[1].replace(/[\"']/g,'').trim(); } }catch{}
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
-  }catch(e){ appendLog('[download] failed'); }
-}
-
-function getPreviewMode(){ return getPreviewModeMod(previewModeEl); }
-setPreviewModeProvider(getPreviewMode);
-
-const resizer = document.getElementById('rightResizer');
-if(resizer){ let dragging=false, startX=0, startW=0; resizer.addEventListener('mousedown', (e)=>{ dragging=true; startX=e.clientX; const cs = getComputedStyle(document.documentElement); const w = cs.getPropertyValue('--right-w').trim(); startW = parseInt(w||'380') || 380; document.body.style.userSelect='none'; }); window.addEventListener('mouseup', ()=>{ if(!dragging) return; dragging=false; document.body.style.userSelect=''; }); window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx = startX - e.clientX; const newW = Math.max(260, Math.min(900, startW + dx)); document.documentElement.style.setProperty('--right-w', newW + 'px'); syncEdgesViewport(); }); }
-
-// Toolbar top bar with Run All
-const sidebarEl = document.getElementById('sidebar');
-const tabsBar = document.createElement('div');
-tabsBar.id = 'runBar';
-tabsBar.style.display='flex';
-tabsBar.style.gap='6px';
-tabsBar.style.margin='8px 0';
-// Prefer placing the run bar at the top of the sidebar; fall back to before(toolbar)
-if(sidebarEl){ sidebarEl.insertBefore(tabsBar, sidebarEl.firstChild || toolbarEl); }
-else { toolbarEl.before(tabsBar); }
-const globalRunBtn = document.createElement('button'); globalRunBtn.textContent='▶ Run All'; Object.assign(globalRunBtn.style, { padding:'6px 10px', background:'#1f6feb', color:'#fff', border:'0', borderRadius:'6px', cursor:'pointer' }); globalRunBtn.addEventListener('click', async ()=>{
-  await runWithBusy(async ()=>{
-    ensureWS(); clearLog(); statusEl.textContent='running...';
-  syncFormsToState();
-  let code = genCode(); code = sanitizePython(code); genCodeEl.textContent = code;
-    const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
-    let js={}; try{ js=await res.json(); }catch{}
-  appendLog('Sent exec: ' + JSON.stringify(js));
-  }, globalRunBtn, 'Running...');
-}); tabsBar.appendChild(globalRunBtn);
-
-function appendLog(x, level){
-  const line = document.createElement('div');
-  line.className = 'log-line ' + (level||'info');
-  line.textContent = x;
-  log.appendChild(line);
-  log.scrollTop = log.scrollHeight;
-}
-function clearLog(){ log.innerHTML = ''; }
+// appendLog, clearLog imported from ./logger.js
 function centerOf(el){ const r = el.getBoundingClientRect(); const p = edgesSvg.getBoundingClientRect(); return { x: r.left - p.left + r.width/2, y: r.top - p.top + r.height/2 }; }
 // View helpers (screen<->world)
 function getScale(){ return state.view?.scale || 1; }
@@ -312,7 +282,7 @@ async function renderPackagesList(){
     const totalNodes = (name)=> (registry.byPackage.get(name)||[]).length;
     if(pkgs.length===0){ pkgsWrap.innerHTML = '<div style="color:#9ba3af">パッケージが読み込まれていません</div>'; return; }
     // まず表の骨格
-    pkgsWrap.innerHTML = `<table style=\"width:100%; border-collapse:collapse; font-size:12px;\"><thead><tr><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Package</th><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Version</th><th style=\"text-align:left; padding:6px 8px; border-bottom:1px solid #263041\">Nodes</th></tr></thead><tbody id=\"pkgsTbody\"></tbody></table>`;
+    pkgsWrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Package</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Version</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #263041">Nodes</th></tr></thead><tbody id="pkgsTbody"></tbody></table>`;
     const tbody = pkgsWrap.querySelector('#pkgsTbody');
     const names = pkgs.map(p=> p.name);
     let versions = new Map();
@@ -338,7 +308,7 @@ function openNodeContextMenu(nodeId, clientX, clientY){
   const ids = (state.selection && state.selection.size && state.selection.has(nodeId))
     ? Array.from(state.selection)
     : [nodeId];
-  const doCopy = ()=>{ try{ clipboardGraph = makeSubgraph(ids); }catch{ clipboardGraph = null; } window.__pf_clipboardGraph = clipboardGraph; };
+  const doCopy = ()=>{ try{ clipboardGraph = makeSubgraph(ids); }catch(e){ clipboardGraph = null; console.error('Copy failed:', e); } window.__pf_clipboardGraph = clipboardGraph; };
   const doCut = ()=>{ try{ clipboardGraph = makeSubgraph(ids); }catch{ clipboardGraph = null; } window.__pf_clipboardGraph = clipboardGraph; try{ deleteNodes(ids); }catch{} render(); };
   const doDuplicate = ()=>{
     try{
@@ -367,8 +337,6 @@ function openNodeContextMenu(nodeId, clientX, clientY){
 }
 
 // Variables
-const escapeHtml = (s)=> escapeHtmlUtil(s);
-const styleTableHtml = (html)=> styleTableHtmlUtil(html);
 function filterVars(arr){ try{ return (arr||[]).filter(v=>{ const t = String(v.type||'').toLowerCase(); const n = String(v.name||'').toLowerCase(); if(n==='exit' || n==='quit') return false; if(n==='in' || n==='out') return false; if(n.startsWith('_')) return false; if(t.includes('module')) return false; if(t.includes('function')) return false; if(t.includes('method')) return false; if(t.includes('autocall')) return false; if(t.includes('zmqexitautocall')) return false; return true; }); }catch{ return arr||[]; } }
 async function refreshVariables(){
   if(!rightVars || rightVars.style.display==='none') return;
@@ -582,7 +550,10 @@ function createNodeEl(node){
     <div class=\"port out\"></div>
   </div>
   <div class=\"body\">${(typeof def.form==='function')? def.form(node, { getUpstreamColumns: ()=> computeUpstreamColumns(node), getUpstreamNode: ()=> upstreamOf(node) }): ''}</div>
-  <div class=\"preview\" ${wantPreview? '':'style=\"display:none\"'} style=\"max-height:${previewH}px\"> <div id=\"prev-${node.id}\"></div> <div class=\"node-resize-v\" title=\"Drag to resize preview height\"></div> </div>
+  <div class=\"preview\" style=\"${wantPreview ? '' : 'display:none;'}max-height:${previewH}px\"> 
+    <div id=\"prev-${node.id}\"></div> 
+    <div class=\"node-resize-v\" title=\"Drag to resize preview height\"></div> 
+  </div>
   <div class=\"actions\">
     <button class=\"node-run btn-primary\">Run</button>
     <button class=\"node-del btn-icon danger\" title=\"Delete\" aria-label=\"Delete\">${'<svg viewBox=\\"0 0 24 24\\" fill=\\"none\\" stroke=\\"currentColor\\" stroke-width=\\"2\\" stroke-linecap=\\"round\\" stroke-linejoin=\\"round\\"><polyline points=\\"3 6 5 6 21 6\\"></polyline><path d=\\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\\"></path><line x1=\\"10\\" y1=\\"11\\" x2=\\"10\\" y2=\\"17\\"></line><line x1=\\"14\\" y1=\\"11\\" x2=\\"14\\" y2=\\"17\\"></line></svg>'}</button>
@@ -810,114 +781,13 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
 function render(){ nodesEl.innerHTML=''; state.nodes.forEach(n=> nodesEl.appendChild(createNodeEl(n)) ); applyViewTransform(); drawEdges(); const code = genCode(); genCodeEl.textContent = code; refreshForms(); renderSubsystems(); renderGroups(); updateRunButtonsState(); saveToLocal(); }
 function refreshForms(){ state.nodes.forEach(n=>{ const el = document.querySelector(`[data-node-id="${n.id}"]`); if(!el) return; const body = el.querySelector('.body'); if(!body) return; const def = registry.nodes.get(n.type); const html = (typeof def.form==='function') ? def.form(n, { getUpstreamColumns: ()=> computeUpstreamColumns(n), getUpstreamNode: ()=> upstreamOf(n) }) : ''; if(typeof html === 'string' && html !== '' && body.innerHTML !== html){ body.innerHTML = html; bindFormMod(el, n, refreshForms); } }); }
 
-// WebSocket & streaming
-let ws; let pendingVarsRefresh = false; function ensureWS(){ if(ws && ws.readyState===1) return; const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; ws = new WebSocket(proto + location.host + '/ws' + tokenQs); ws.onopen = ()=> { appendLog('[ws] connected'); updateRunButtonsState(); }; ws.onclose = ()=> { appendLog('[ws] closed'); updateRunButtonsState(); }; ws.onmessage = async ev => { const data = JSON.parse(ev.data); if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){ kernelDisabled = true; statusEl.textContent='kernel disabled'; appendLog('[kernel] feature disabled'); try{ ws && ws.close(); }catch{} updateRunButtonsState(); return; } if (data.type === 'stream') { const streamName = (data.content && data.content.name) ? data.content.name : ''; const t = data.content.text || ''; if(streamName==='stderr'){ t.split(/\r?\n/).forEach(ln=>{ if(ln) appendLog(ln, 'stderr'); }); return; } const re = /\[\[PREVIEW:([^:]+):(HEAD|DESC)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let m; let rest = t; while((m = re.exec(t))){ const id=m[1], kind=m[2], body=(m[3]||''); if(kind==='HEAD'){ state.preview.head.set(id, body); const tgt = document.getElementById('prev-' + id); if(tgt){ const hasImg = !!tgt.querySelector('img'); if(!hasImg && !state.preview.headHtml.get(id)){ tgt.innerHTML = `<pre style="margin:0; white-space:pre-wrap">${body.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } else { state.preview.desc.set(id, body); } } const reHtml = /\[\[PREVIEW:([^:]+):(HEADHTML|DESCHTML)\]\]([\s\S]*?)(?=(\n\[\[PREVIEW:|$))/g; let mh; while((mh = reHtml.exec(t))){ const id=mh[1], kind=mh[2], body=(mh[3]||''); const n=getNode(id); const pmode=getPreviewMode(); const want = document.getElementById('prev-' + id) && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(!want) continue; if(n && isFigureNode(n) && pmode!=='all' && pmode!=='plots'){ continue; } if(kind==='HEADHTML'){ state.preview.headHtml.set(id, body); updateNodePreview(id); } else { state.preview.descHtml.set(id, body); updateNodePreview(id); } } rest = rest.replace(re, '').replace(reHtml, ''); const lines = String(rest).split(/\r?\n/); for(const ln of lines){ if(!ln) continue; /* INSERT START: handle [[SKIP:nid]] */ let msK = ln.match(/^\[\[SKIP:([^\]]+)\]\]$/); if(msK){ const nid = msK[1]; const title = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(title){ const old = title.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent='skip'; title.appendChild(chip); } appendLog(`[node ${nid}] unchanged -> skip`); continue; } /* INSERT END */
-        // Auto-introspect module marker: [[INTROSPECT_MODULE:module.path]]
-        let mm = ln.match(/^\[\[INTROSPECT_MODULE:([^\]]+)\]\]$/);
-        if(mm){
-          const mod = mm[1];
-          try{
-            const res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(mod));
-            const js = await res.json().catch(()=>({}));
-            const arr = Array.isArray(js.nodes) ? js.nodes : [];
-    if(arr.length){
-              for(const spec of arr){
-                const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
-                if(registry.nodes.has(id)) continue;
-                const def = {
-                  id,
-                  title: spec.title || id,
-      category: spec.category || 'Auto',
-                  inputType: spec.inputType || 'Any',
-                  outputType: spec.outputType || 'Any',
-      defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
-                  form(node){
-                    const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
-                    const fields = (spec.params||[]).filter(p=> !p.hidden);
-                    function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
-                    function inputFor(p){ const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string'; if(ui==='select' && Array.isArray(p.enum)){ const opts=p.enum.map(x=>`<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join(''); return `<label>${label}</label><select name="${name}">${opts}</select>`; } if(ui==='textarea'){ return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`; } return `<label>${label}</label><input name="${name}" value="${val||''}">`; }
-                    const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
-                    const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
-                    return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
-                  },
-                  code(node, ctx){
-                    const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-                    const p = node.params||{};
-                    const call = spec.call || {};
-                    const params = (spec.params||[])
-                      .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
-                      .filter(x=> p[x.name]!==undefined)
-                      .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
-                      .join(', ');
-                    const target = call.target || '';
-                    const parts = target.split('.');
-                    const root = parts[0] || '';
-                    const modPath = parts.slice(0, -1).join('.');
-                    const seg = [];
-                    if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
-                    if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
-                    const src = (ctx && typeof ctx.srcVar==='function') ? ctx.srcVar(node) : null;
-                    const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : (src? [src]: []);
-                    const dfParam = call.dfParam || null;
-                    if(call.kind==='function'){
-                      if(dfParam && src){
-                        const argz = [];
-                        argz.push(`${dfParam}=${src}`);
-                        if(params) argz.push(params);
-                        seg.push(`${v} = ${target}(${argz.join(', ')})`);
-                      } else {
-                        seg.push(`${v} = ${target}(${params})`);
-                      }
-                    } else if(call.kind==='constructor'){
-                      seg.push(`${v} = ${target}(${params})`);
-                    } else if(call.kind==='method'){
-                      // prefer first upstream as receiver (estimator), last as data
-                      let recv = srcs[0] || src;
-                      const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
-                      if(!recv && call.receiver && call.receiver!=='estimator'){
-                        recv = `globals().get('${call.receiver}', None)`;
-                      }
-                      const meth = target.split('.').slice(-1)[0];
-                      if(recv){
-                        const argz = [];
-                        if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
-                        if(params) argz.push(params);
-                        const joined = argz.join(', ');
-                        if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
-                        else seg.push(`${v} = ${recv}.${meth}(${joined})`);
-                        if(call.returnsSelf) seg.push(`${v} = ${recv}`);
-                      } else {
-                        seg.push(`${v} = ${target}(${params})`);
-                      }
-                    } else {
-                      seg.push(`${v} = ${target}(${params})`);
-                    }
-                    seg.push(`print(${v})`);
-                    return seg;
-                  }
-                };
-                registry.nodes.set(id, def);
-                const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
-                if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
-                if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
-                registry.byPackage.get(pkgName).push(id);
-              }
-              renderToolbar();
-              appendLog(`[autogen] ${arr.length} node(s) from ${mod}`);
-            } else {
-              appendLog(`[autogen] no callables found in ${mod}`);
-            }
-          }catch(e){ appendLog('[autogen] failed for ' + mod); }
-          continue;
-        }
-        // End auto-introspect marker handling
-        
-        let mb = ln.match(/^\[\[NODE:([^:]+):BEGIN\]\]$/); if(mb){ const nid = mb[1]; state.stream.currentNodeId = nid; state.preview.head.delete(nid); state.preview.desc.delete(nid); state.preview.headHtml.delete(nid); state.preview.descHtml.delete(nid); state.stream.buffers.set(nid, ''); state.stream.timings = state.stream.timings || new Map(); state.stream.timings.set(nid, { start: performance.now() }); const tgt = document.getElementById('prev-' + nid); if(tgt){ tgt.innerHTML = '<div class="empty">Running…</div>'; } continue; } let me = ln.match(/^\[\[NODE:([^:]+):END\]\]$/); if(me){ const nid = me[1]; const rec = (state.stream.timings && state.stream.timings.get(nid)) || null; const end = performance.now(); const ms = rec && rec.start ? Math.max(0, Math.round(end - rec.start)) : null; state.stream.currentNodeId = null; if(ms!=null){ const tgt = document.querySelector(`[data-node-id="${nid}"] .head .title`); if(tgt){ const old = tgt.querySelector('.chip'); if(old) old.remove(); const chip = document.createElement('span'); chip.className='chip'; chip.textContent = `${ms} ms`; tgt.appendChild(chip); } } continue; } const cur = state.stream.currentNodeId; if(cur){ const n=getNode(cur); const pmode=getPreviewMode(); const tgt = document.getElementById('prev-' + cur); const allowText = tgt && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowText){ if(!(n && isFigureNode(n))){ const prevTxt = state.stream.buffers.get(cur) || ''; const next = prevTxt + (prevTxt? '\n':'') + ln; state.stream.buffers.set(cur, next); if(tgt && !tgt.querySelector('img') && !state.preview.headHtml.get(cur)){ tgt.innerHTML = `<pre style=\"margin:0; white-space:pre-wrap\">${next.replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; } } } } else { appendLog(ln); } } updatePreviewDock(); } else if (data.type === 'display_data' || data.type === 'execute_result') { const d = data.content.data || {}; if(d['image/png']){ let nid = (state.lastPlotNodeId||''); let n = getNode(nid); const pmode=getPreviewMode(); let tgt = document.getElementById('prev-' + nid); if(!(n && isFigureNode(n)) || !tgt){ const figs = state.nodes.filter(isFigureNode); if(figs.length){ nid = figs[figs.length-1].id; n = getNode(nid); tgt = document.getElementById('prev-' + nid); } } const allowPlot = pmode!=='none' && (pmode==='all' || (pmode==='plots' && n && isFigureNode(n))); if(allowPlot && tgt){ const imgHtml = `<img style=\"margin-top:8px\" src=\"data:image/png;base64,${d['image/png']}\">`; if(n && isFigureNode(n)){ tgt.innerHTML = imgHtml; const wrap=document.getElementById('prevwrap-'+nid); if(wrap) wrap.open = true; } else { const existingImg = tgt.querySelector('img'); if(tgt.querySelector('.node-preview-grid')){ if(existingImg) existingImg.remove(); tgt.insertAdjacentHTML('beforeend', imgHtml); } else { tgt.innerHTML = imgHtml; } } } } else if (d['text/plain']) { appendLog(d['text/plain']); } else { appendLog('[output] ' + JSON.stringify(d)); } } else if (data.type === 'error') { appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue), 'error'); const id = state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style=\"color:#ff8888; white-space:pre-wrap; margin:0\">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } } } else if (data.type === 'status') { if(data.content && data.content.execution_state==='idle'){ if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ refreshVariables(); }catch{} } runningLock=false; updateRunButtonsState(); } else { runningLock=true; updateRunButtonsState(); } } }; }
+// WebSocket handling moved to ws.js; ensureWS() above delegates to it
 
 function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id); }
 
-export async function boot(){
+async function boot(){
   await loadPackages();
+  try{ setPreviewModeProvider(()=> getPreviewMode()); }catch{}
   renderToolbar();
   try{ renderPackagesList(); }catch{}
   // Left pane uses sidebar scroll; no explicit maxHeight on toolbar
@@ -927,37 +797,10 @@ export async function boot(){
   // Ensure code block scrolls
   try{ if(genCodeEl){ genCodeEl.style.overflow='auto'; genCodeEl.style.minHeight='0'; } }catch{}
   // Ensure run bar exists (rare cases where DOM was reflowed before creation)
-  try{ if(!document.getElementById('runBar')){ const rb = document.createElement('div'); rb.id='runBar'; rb.style.display='flex'; rb.style.gap='6px'; rb.style.margin='8px 0'; if(sidebarEl){ sidebarEl.insertBefore(rb, sidebarEl.firstChild || toolbarEl); } else { toolbarEl.before(rb); } rb.appendChild(globalRunBtn); } }catch{}
+  ensureRunBar();
 
   // Ensure left-bottom actions area exists (Install/Restart/Sample)
-  try{
-    let actionsEl = document.getElementById('actions');
-    const sidebar = document.getElementById('sidebar');
-    if(!actionsEl){
-      actionsEl = document.createElement('div');
-      actionsEl.id = 'actions';
-      actionsEl.style.display = 'flex';
-      actionsEl.style.gap = '8px';
-      actionsEl.style.marginTop = '12px';
-      actionsEl.style.flexWrap = 'wrap';
-      actionsEl.style.position = 'sticky';
-      actionsEl.style.bottom = '0';
-      actionsEl.style.left = '0'; actionsEl.style.right = '0';
-      actionsEl.style.background = 'var(--panel)';
-      actionsEl.style.padding = '8px 0';
-      actionsEl.style.borderTop = '1px solid #1f2329';
-      actionsEl.style.zIndex = '5';
-      if(sidebar) sidebar.appendChild(actionsEl);
-    }
-    const ensureBtn = (id, text, cls)=>{
-      let b = document.getElementById(id);
-      if(!b){ b = document.createElement('button'); b.id=id; b.textContent=text; if(cls) b.className = cls; actionsEl.appendChild(b); }
-      return b;
-    };
-    ensureBtn('installBtn', 'Install / Check', 'warn');
-    ensureBtn('restartBtn', 'Restart Kernel', 'secondary');
-    ensureBtn('sampleBtn', 'Sample', 'secondary');
-  }catch{}
+  ensureActionsArea();
   // try restore
   try { restoreFromLocal(); } catch {}
 
@@ -967,7 +810,8 @@ export async function boot(){
   const saveFlowBtn = document.createElement('button'); saveFlowBtn.id='saveFlowBtn'; saveFlowBtn.className='secondary'; saveFlowBtn.textContent='Save Flow';
   const loadFlowBtn = document.createElement('button'); loadFlowBtn.id='loadFlowBtn'; loadFlowBtn.className='secondary'; loadFlowBtn.textContent='Load Flow';
   const addTargetBtn = document.createElement('button'); addTargetBtn.id='addTargetBtn'; addTargetBtn.className='secondary'; addTargetBtn.textContent='Add Target'; addTargetBtn.title='Create a node from fully-qualified name via introspection';
-  actionsEl?.appendChild(saveFlowBtn); actionsEl?.appendChild(loadFlowBtn); actionsEl?.appendChild(addTargetBtn); actionsEl?.appendChild(signBtn);
+  const importBtn = document.createElement('button'); importBtn.id='importBtn'; importBtn.className='secondary'; importBtn.textContent='Import Module'; importBtn.title='Introspect a module and add its nodes to the toolbar';
+  actionsEl?.appendChild(saveFlowBtn); actionsEl?.appendChild(loadFlowBtn); actionsEl?.appendChild(importBtn); actionsEl?.appendChild(addTargetBtn); actionsEl?.appendChild(signBtn);
 
   signBtn.addEventListener('click', ()=>{
     const cur = getStoredToken();
@@ -1097,6 +941,101 @@ export async function boot(){
     }catch(e){ appendLog('[introspect] failed'); }
   });
 
+  // Import Module: introspect a module and register its auto-generated nodes
+  importBtn.addEventListener('click', async ()=>{
+    try{
+      const mod = window.prompt('Enter module name to import (e.g., pandas, polars, sklearn):', 'pandas');
+      if(!mod) return;
+      const res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(mod));
+      const js = await res.json().catch(()=>({}));
+      const arr = Array.isArray(js.nodes) ? js.nodes : [];
+      if(!arr.length){ appendLog('[import] no callables found in ' + mod); return; }
+      for(const spec of arr){
+        const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
+        if(registry.nodes.has(id)) continue;
+        const def = {
+          id,
+          title: spec.title || id,
+          category: spec.category || 'Auto',
+          inputType: spec.inputType || 'Any',
+          outputType: spec.outputType || 'Any',
+          defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
+          form(node){
+            const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
+            const fields = (spec.params||[]).filter(p=> !p.hidden);
+            function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
+            function inputFor(p){ const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string'; if(ui==='select' && Array.isArray(p.enum)){ const opts=p.enum.map(x=>`<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join(''); return `<label>${label}</label><select name="${name}">${opts}</select>`; } if(ui==='textarea'){ return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`; } return `<label>${label}</label><input name="${name}" value="${val||''}">`; }
+            const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
+            const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
+            return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
+          },
+          code(node, ctx){
+            const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+            const p = node.params||{};
+            const call = spec.call || {};
+            const params = (spec.params||[])
+              .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
+              .filter(x=> p[x.name]!==undefined)
+              .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
+              .join(', ');
+            const target = call.target || '';
+            const parts = target.split('.');
+            const root = parts[0] || '';
+            const modPath = parts.slice(0, -1).join('.');
+            const seg = [];
+            if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
+            if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
+            const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : [];
+            const src = srcs[0] || null;
+            const dfParam = call.dfParam || null;
+            if(call.kind==='function'){
+              if(dfParam && src){
+                const argz = [];
+                argz.push(`${dfParam}=${src}`);
+                if(params) argz.push(params);
+                seg.push(`${v} = ${target}(${argz.join(', ')})`);
+              } else {
+                seg.push(`${v} = ${target}(${params})`);
+              }
+            } else if(call.kind==='constructor'){
+              seg.push(`${v} = ${target}(${params})`);
+            } else if(call.kind==='method'){
+              let recv = srcs[0] || src;
+              const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
+              if(!recv && call.receiver && call.receiver!=='estimator'){
+                recv = `globals().get('${call.receiver}', None)`;
+              }
+              const meth = target.split('.').slice(-1)[0];
+              if(recv){
+                const argz = [];
+                if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
+                if(params) argz.push(params);
+                const joined = argz.join(', ');
+                if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
+                else seg.push(`${v} = ${recv}.${meth}(${joined})`);
+                if(call.returnsSelf) seg.push(`${v} = ${recv}`);
+              } else {
+                seg.push(`${v} = ${target}(${params})`);
+              }
+            } else {
+              seg.push(`${v} = ${target}(${params})`);
+            }
+            seg.push(`print(${v})`);
+            return seg;
+          }
+        };
+        registry.nodes.set(id, def);
+        const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+        if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+        if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+        registry.byPackage.get(pkgName).push(id);
+      }
+      renderToolbar();
+      try{ renderPackagesList(); }catch{}
+      appendLog('[import] added ' + arr.length + ' node(s) from ' + mod);
+    }catch(e){ appendLog('[import] failed'); }
+  });
+
   // Buttons
   document.getElementById('sampleBtn').addEventListener('click', ()=>{
     state.nodes=[]; state.edges=[]; state.nextId=1; state.groups=[];
@@ -1129,7 +1068,7 @@ export async function boot(){
       appendLog('[kernel] restart error');
     }
     statusEl.textContent='idle';
-    try{ if(ws) ws.close(); }catch{}
+  try{ const _ws = wsCtl && wsCtl.getWS ? wsCtl.getWS() : null; if(_ws) _ws.close(); }catch{}
     ensureWS();
   });
 
@@ -1269,3 +1208,8 @@ async function renderImportsList(){
   }catch{ wrap.innerHTML = '<div style="color:#9ba3af">取得失敗</div>'; }
   return box;
 }
+
+// expose boot for runtime
+try{ window.__PF_boot = boot; }catch{}
+
+ 

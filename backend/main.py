@@ -34,6 +34,7 @@ except Exception:
     except Exception:  # last-resort fallback
         ValidationError = Exception  # type: ignore
 from .exec_control import exec_registry, enforce_timeout_and_interrupt
+from .config import pip_timeout_seconds
 import re
 
 
@@ -51,9 +52,19 @@ kc = None  # type: ignore
 # Gate to coordinate exclusive iopub reads between websocket stream and API calls
 iopub_gate = asyncio.Lock()
 
+# In-flight pip installs registry (id -> Popen)
+_pip_processes = {}
+
 # Static frontend dir
 static_dir = Path(__file__).resolve().parent.parent / "frontend"
 root_dir = Path(__file__).resolve().parent.parent
+
+# Load .env for local/dev convenience (no-op if missing)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(dotenv_path=root_dir / ".env")
+except Exception:
+    pass
 
 def _uploads_dir() -> Path:
     d = root_dir / "data" / "uploads"
@@ -90,13 +101,178 @@ async def list_packages():
 # Frontend tries to fetch this at startup; return an empty list when not configured
 # to avoid noisy 404s in the browser console.
 @app.get("/api/autogen")
-async def api_autogen():
-    return {"nodes": []}
+async def api_autogen(modules: Optional[str] = None, include: Optional[str] = None, exclude: Optional[str] = r"^_", limit: int = 50, force: bool = False, _: bool = Depends(require_auth)):
+    """Return auto-generated node specs for configured modules.
+    Uses a small in-memory cache to avoid repeated introspection.
+    Env:
+      - PYFLOWS_AUTOGEN_MODULES="pandas,sklearn"
+      - PYFLOWS_AUTOGEN_INCLUDE=regex (default ".*")
+      - PYFLOWS_AUTOGEN_EXCLUDE=regex (default "^_")
+      - PYFLOWS_AUTOGEN_LIMIT=per-module cap (default 50)
+      - PYFLOWS_AUTOGEN_TTL=seconds to cache (default 600)
+    Query params can override modules/include/exclude/limit; add force=true to bypass cache.
+    """
+    if not kernel_feature_enabled():
+        return {"nodes": []}
+    global kc
+    if kc is None:
+        return JSONResponse({"error": "kernel not ready"}, status_code=503)
+
+    # Read config (env, then query overrides)
+    import os as _os
+    from time import time as _now
+    env_mods = _os.environ.get("PYFLOWS_AUTOGEN_MODULES", "").strip()
+    env_include = _os.environ.get("PYFLOWS_AUTOGEN_INCLUDE", ".*")
+    env_exclude = _os.environ.get("PYFLOWS_AUTOGEN_EXCLUDE", r"^_")
+    try:
+        env_limit = int(_os.environ.get("PYFLOWS_AUTOGEN_LIMIT", "50").strip())
+    except Exception:
+        env_limit = 50
+    try:
+        ttl = float(_os.environ.get("PYFLOWS_AUTOGEN_TTL", "600").strip())
+    except Exception:
+        ttl = 600.0
+    # Final effective config (query params override env)
+    mods_raw = (modules or env_mods or "").strip()
+    include = include or env_include
+    exclude = exclude or env_exclude
+    limit = int(limit or env_limit)
+    mods = [m.strip() for m in mods_raw.split(',') if m.strip()]
+    if not mods:
+        return {"nodes": []}
+
+    # Fetch module versions (to key cache by version and avoid stale results)
+    versions = {}
+    try:
+        # Build small kernel snippet to import modules and read __version__
+        esc = lambda s: s.replace("'", "\\'")
+        list_repr = ",".join([f"'{esc(m)}'" for m in mods])
+        vcode = (
+            "import json, importlib\n"
+            f"__mods = [{list_repr}]\n"
+            "__out = []\n"
+            "for __m in __mods:\n"
+            "    try:\n"
+            "        _mod = importlib.import_module(__m)\n"
+            "        _ver = getattr(_mod, '__version__', None)\n"
+            "        __out.append({'name': __m, 'version': str(_ver) if _ver is not None else None})\n"
+            "    except Exception:\n"
+            "        __out.append({'name': __m, 'version': None})\n"
+            "print('[[VERSIONS]]' + json.dumps(__out))\n"
+        )
+        vitems = None
+        async with iopub_gate:
+            vmsg_id = kc.execute(vcode)
+            v_deadline = time.time() + 4.0
+            try:
+                while time.time() < v_deadline:
+                    try:
+                        vmsg = kc.get_iopub_msg(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if vmsg.get("parent_header", {}).get("msg_id") != vmsg_id:
+                        continue
+                    mtype = vmsg.get("header", {}).get("msg_type")
+                    content = vmsg.get("content", {})
+                    if mtype == "stream" and content.get("text", "").startswith("[[VERSIONS]]"):
+                        try:
+                            vitems = json.loads(content.get("text", "")[len("[[VERSIONS]]"):])
+                        except Exception:
+                            vitems = None
+                        break
+                    elif mtype == "status" and content.get("execution_state") == "idle":
+                        break
+            except Exception:
+                pass
+        try:
+            await exec_registry.resolve(vmsg_id)
+        except Exception:
+            pass
+        if isinstance(vitems, list):
+            for it in vitems:
+                n = str(it.get('name', ''))
+                versions[n] = it.get('version') or ''
+    except Exception:
+        versions = {m: '' for m in mods}
+
+    # In-memory cache keyed by (mods+versions, include, exclude, limit)
+    mv = tuple(sorted([(m, versions.get(m, '')) for m in mods]))
+    cache_key = (mv, include, exclude, int(limit))
+    if not hasattr(api_autogen, "_cache"):
+        api_autogen._cache = {}  # type: ignore[attr-defined]
+    cache = getattr(api_autogen, "_cache")  # type: ignore
+    ent = cache.get(cache_key)
+    now = _now()
+    if ent and not force and ent.get("exp", 0) > now:
+        return {"nodes": ent.get("nodes", [])}
+
+    # Build by introspecting each module via the kernel
+    nodes = []
+    for mod in mods:
+        code = _introspect_module_code(mod, include, exclude, limit)
+        data = None
+        async with iopub_gate:
+            msg_id = kc.execute(code)
+            deadline = time.time() + 8.0
+            try:
+                while time.time() < deadline:
+                    try:
+                        msg = kc.get_iopub_msg(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                        continue
+                    mtype = msg.get("header", {}).get("msg_type")
+                    content = msg.get("content", {})
+                    if mtype == "stream":
+                        text = content.get("text", "")
+                        if text.startswith("[[INTROSPECT]]"):
+                            payload = text[len("[[INTROSPECT]]"):]
+                            try:
+                                data = json.loads(payload)
+                            except Exception:
+                                data = None
+                            break
+                    elif mtype == "status" and content.get("execution_state") == "idle":
+                        break
+            except Exception:
+                pass
+        try:
+            await exec_registry.resolve(msg_id)
+        except Exception:
+            pass
+        if isinstance(data, dict) and isinstance(data.get("nodes"), list):
+            nodes.extend(data["nodes"])
+
+    # Cache result
+    cache[cache_key] = {"exp": now + ttl, "nodes": nodes}
+    return {"nodes": nodes}
+
+@app.post("/api/autogen/refresh")
+async def api_autogen_refresh(_: bool = Depends(require_auth)):
+    """Clear cached auto-generated specs so next /api/autogen rebuilds."""
+    if hasattr(api_autogen, "_cache"):
+        try:
+            getattr(api_autogen, "_cache").clear()  # type: ignore
+        except Exception:
+            pass
+    return {"ok": True}
 
 @app.on_event("startup")
 async def startup():
     if kernel_feature_enabled():
         await _start_new_kernel()
+        # Warm autogen cache in background if modules are configured
+        async def _warm():
+            try:
+                # Use env defaults for modules/include/exclude/limit; bypass auth dep
+                await api_autogen(None, None, r"^_", 50, True, _=True)
+            except Exception:
+                pass
+        try:
+            asyncio.create_task(_warm())
+        except Exception:
+            pass
     else:
         print("[Kernel] Feature disabled; running without Jupyter kernel")
 
@@ -669,6 +845,193 @@ async def api_module_versions(names: str = "", _: bool = Depends(require_auth)):
         pass
     return {"items": items or []}
 
+# ------------------- Package installation (server environment) -------------------
+
+@app.post("/api/pip/install")
+async def api_pip_install(body: dict, _: bool = Depends(require_auth)):
+    """Install a Python package into the server environment via pip, then attempt to import it.
+    Body:
+      { "name": "packagename", "version": "", "extras": "", "indexUrl": "", "upgrade": false }
+    Response:
+      { ok, name, version, output }
+    """
+    name = str(body.get("name") or "").strip()
+    version = str(body.get("version") or "").strip()
+    extras = str(body.get("extras") or "").strip()
+    index_url = str(body.get("indexUrl") or "").strip()
+    upgrade = bool(body.get("upgrade") or False)
+    if not name:
+        return JSONResponse({"error": "missing 'name'"}, status_code=400)
+    req = name
+    if extras:
+        req += extras
+    if version:
+        # accept either exact '==' or any specifier; if user passed operator keep it
+        if any(op in version for op in ["<",">","=","~",","]):
+            req += version
+        else:
+            req += f"=={version}"
+    args = [sys.executable, "-m", "pip", "install"]
+    if upgrade:
+        args.append("--upgrade")
+    if index_url:
+        args += ["-i", index_url]
+    args.append(req)
+    try:
+        out = subprocess.check_output(args, stderr=subprocess.STDOUT, text=True, timeout=pip_timeout_seconds())
+        # Try import to fetch version
+        modname = name.split("[")[0]
+        ver = None
+        try:
+            import importlib
+            m = importlib.import_module(modname)
+            ver = getattr(m, "__version__", None)
+        except Exception:
+            ver = None
+        return {"ok": True, "name": modname, "version": (str(ver) if ver is not None else None), "output": out[-2000:]}
+    except subprocess.TimeoutExpired as e:
+        return JSONResponse({"ok": False, "name": name, "error": "pip timeout", "output": (e.output or "")[-2000:]}, status_code=504)
+    except subprocess.CalledProcessError as e:
+        return JSONResponse({"ok": False, "name": name, "error": "pip failed", "output": (e.output or "")[-2000:]}, status_code=500)
+
+
+@app.post("/api/pip/install/stream")
+async def api_pip_install_stream(body: dict, _: bool = Depends(require_auth)):
+    """Stream pip install logs as chunked text. Emits a final DONE line with name/version.
+    Response headers include X-Install-Id for cancellation.
+    """
+    name = str(body.get("name") or "").strip()
+    version = str(body.get("version") or "").strip()
+    extras = str(body.get("extras") or "").strip()
+    index_url = str(body.get("indexUrl") or "").strip()
+    upgrade = bool(body.get("upgrade") or False)
+    if not name:
+        return JSONResponse({"error": "missing 'name'"}, status_code=400)
+    req = name
+    if extras:
+        req += extras
+    if version:
+        if any(op in version for op in ["<",">","=","~",","]):
+            req += version
+        else:
+            req += f"=={version}"
+    args = [sys.executable, "-m", "pip", "install"]
+    if upgrade:
+        args.append("--upgrade")
+    if index_url:
+        args += ["-i", index_url]
+    args.append(req)
+    install_id = str(uuid.uuid4())
+    timeout = pip_timeout_seconds()
+
+    def _run():
+        import time as _t
+        start = _t.time()
+        try:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        except Exception as e:
+            yield f"ERROR: failed to start pip: {e}\n"
+            return
+        _pip_processes[install_id] = proc
+        yield f"[[ID]] {install_id}\n"
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    yield line if line.endswith('\n') else (line + '\n')
+                    if _t.time() - start > timeout:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        yield f"ERROR: timeout after {timeout}s\n"
+                        break
+        except Exception:
+            pass
+        rc = None
+        try:
+            rc = proc.wait(timeout=5)
+        except Exception:
+            rc = None
+        # try import for version
+        modname = name.split("[")[0]
+        ver = None
+        if rc == 0:
+            try:
+                import importlib
+                m = importlib.import_module(modname)
+                ver = getattr(m, "__version__", None)
+            except Exception:
+                ver = None
+        try:
+            _pip_processes.pop(install_id, None)
+        except Exception:
+            pass
+        done = json.dumps({"name": modname, "version": (str(ver) if ver is not None else None), "rc": rc})
+        yield f"[[DONE]] {done}\n"
+
+    headers = {"X-Install-Id": install_id, "X-Accel-Buffering": "no"}
+    return StreamingResponse(_run(), media_type="text/plain", headers=headers)
+
+
+@app.post("/api/pip/cancel")
+async def api_pip_cancel(body: dict, _: bool = Depends(require_auth)):
+    """Cancel a running pip install started via /api/pip/install/stream by id."""
+    iid = str(body.get("id") or "").strip()
+    if not iid:
+        return JSONResponse({"error": "missing 'id'"}, status_code=400)
+    proc = _pip_processes.get(iid)
+    if not proc:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        proc.kill()
+        _pip_processes.pop(iid, None)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/pip/versions")
+async def api_pip_versions(body: dict, _: bool = Depends(require_auth)):
+    """Return available versions for a package by invoking 'pip index versions <name>'.
+    Body: { name: string, indexUrl?: string }
+    Response: { name, versions: [str], latest?: str }
+    """
+    name = str(body.get("name") or "").strip()
+    index_url = str(body.get("indexUrl") or "").strip()
+    if not name:
+        return JSONResponse({"error": "missing 'name'"}, status_code=400)
+    args = [sys.executable, "-m", "pip", "index", "versions", name]
+    if index_url:
+        args += ["-i", index_url]
+    timeout = min(60, pip_timeout_seconds())
+    try:
+        cp = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        out = cp.stdout or ""
+        versions = []
+        latest = None
+        for line in (out.splitlines() if out else []):
+            s = line.strip()
+            if not s:
+                continue
+            # 'package (x.y.z)' line often includes latest
+            if s.lower().startswith(name.lower()+" (") and s.endswith(")"):
+                try:
+                    latest = s[s.rfind('(')+1 : -1].strip()
+                except Exception:
+                    pass
+            if s.lower().startswith("available versions:"):
+                # e.g. 'Available versions: 2.1.0, 2.0.1, 2.0.0'
+                try:
+                    tail = s.split(":",1)[1].strip()
+                    versions = [v.strip() for v in tail.split(',') if v.strip()]
+                except Exception:
+                    versions = []
+        return {"name": name, "versions": versions, "latest": latest}
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"error": "timeout"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 # ------------------- Imports (in-kernel registry) -------------------
 
 @app.get("/api/imports")
@@ -725,6 +1088,60 @@ async def api_list_imports(_: bool = Depends(require_auth)):
 
 # ------------------- Introspection APIs -------------------
 
+@app.get("/api/modules/installed")
+async def api_modules_installed(q: Optional[str] = None, limit: int = 200, offset: int = 0, importableOnly: bool = False, _: bool = Depends(require_auth)):
+    """List installed distributions with optional substring filter and pagination.
+    This is used by the UI to discover modules for on-demand autogeneration.
+    Query:
+      - q: case-insensitive substring filter on name
+      - limit/offset: pagination
+      - importableOnly: when true, keep only names that can be imported (best-effort)
+    """
+    try:
+        import importlib.metadata as _md
+    except Exception:
+        try:
+            import importlib_metadata as _md  # type: ignore
+        except Exception:
+            _md = None  # type: ignore
+    items = []
+    if _md is not None:
+        try:
+            for dist in _md.distributions():
+                try:
+                    nm = dist.metadata.get('Name') or dist.metadata.get('Summary') or dist._name  # type: ignore[attr-defined]
+                    ver = dist.version
+                    if not nm:
+                        continue
+                    name = str(nm)
+                    if q and q.strip():
+                        if q.strip().lower() not in name.lower():
+                            continue
+                    items.append({"name": name, "version": str(ver)})
+                except Exception:
+                    continue
+        except Exception:
+            items = []
+    # Optional filter: importable only (best-effort; avoid side-effects by skipping heavy ones)
+    if importableOnly and items:
+        out = []
+        for it in items:
+            try:
+                import importlib
+                # Try import using normalized root name (may not always match)
+                root = (it.get('name') or '').split('[')[0]
+                if root:
+                    importlib.import_module(root)
+                    out.append(it)
+            except Exception:
+                continue
+        items = out
+    total = len(items)
+    start = max(0, int(offset or 0))
+    end = max(start, min(total, start + max(1, int(limit or 200))))
+    page = items[start:end]
+    return {"items": page, "total": total, "offset": start, "limit": end - start}
+
 def _introspect_module_code(mod: str, include: str, exclude: str, limit: int) -> str:
     # Python snippet executed in kernel to inspect module and emit NodeSpec list
     return (
@@ -734,23 +1151,48 @@ def _introspect_module_code(mod: str, include: str, exclude: str, limit: int) ->
         f"_exc = re.compile(r'''{exclude or '^_'}''')\n"
         f"_limit = int({max(1, int(limit or 50))})\n"
         "_out = []\n"
-        "def _param_specs(obj):\n"
+        "def _short_doc(obj):\n"
         "  try:\n"
-        "    sig = inspect.signature(obj)\n"
+        "    d = inspect.getdoc(obj)\n"
+        "    if not d: return ''\n"
+        "    line = str(d).strip().splitlines()[0] if str(d).strip().splitlines() else ''\n"
+        "    return line[:180]\n"
         "  except Exception:\n"
-        "    return []\n"
-        "  ps = []\n"
-        "  for n, p in sig.parameters.items():\n"
-        "    if n in ('self','cls'): continue\n"
-        "    if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD): continue\n"
-        "    d = None\n"
-        "    if p.default is not inspect._empty:\n"
-        "      try:\n"
-        "        d = p.default if isinstance(p.default,(str,int,float,bool)) else str(p.default)\n"
-        "      except Exception:\n"
-        "        d = str(p.default)\n"
-        "    ps.append({'name': n, 'default': d, 'ui': 'string'})\n"
-        "  return ps\n"
+        "    return ''\n"
+    "def _param_specs(obj):\n"
+    "  try:\n"
+    "    sig = inspect.signature(obj)\n"
+    "  except Exception:\n"
+    "    return []\n"
+    "  ps = []\n"
+    "  # Remember the first non-self/cls arg name for potential dfParam hint\n"
+    "  first_name = None\n"
+    "  for n, p in sig.parameters.items():\n"
+    "    if n in ('self','cls'): continue\n"
+    "    if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD): continue\n"
+    "    d_val = None\n"
+    "    if p.default is not inspect._empty:\n"
+    "      try:\n"
+    "        d_val = p.default if isinstance(p.default,(str,int,float,bool)) else str(p.default)\n"
+    "      except Exception:\n"
+    "        d_val = str(p.default)\n"
+    "    ui = 'string'\n"
+    "    try:\n"
+    "      ann = getattr(p, 'annotation', inspect._empty)\n"
+    "      tname = (ann.__name__ if hasattr(ann,'__name__') else str(ann)) if ann is not inspect._empty else ''\n"
+    "      if tname in ('int','float'): ui = 'number'\n"
+    "      elif tname.lower() in ('bool','boolean'): ui = 'bool'\n"
+    "    except Exception:\n"
+    "      pass\n"
+    "    if ui=='string' and p.default is not inspect._empty:\n"
+    "      if isinstance(p.default, (int,float)): ui='number'\n"
+    "      elif isinstance(p.default, bool): ui='bool'\n"
+    "    if first_name is None: first_name = n\n"
+    "    # Hide the first param by default; it will be auto-wired from upstream\n"
+    "    lbl = n.replace('_',' ').title()\n"
+    "    hidden = (n == first_name)\n"
+    "    ps.append({'name': n, 'label': lbl, 'default': d_val, 'ui': ui, 'hidden': bool(hidden)})\n"
+    "  return ps\n"
         "try:\n"
         "  M = importlib.import_module(_modname)\n"
         "  items = []\n"
@@ -765,15 +1207,16 @@ def _introspect_module_code(mod: str, include: str, exclude: str, limit: int) ->
     "        _m = getattr(obj, '__module__', _modname) or _modname\n"
     "        _root2 = (_m.split('.')[0] if _m else _root)\n"
     "        _cat2 = (_m.split('.')[-1] if _m else _cat).capitalize()\n"
-        "        _out.append({\n"
+    "        _out.append({\n"
         "          'id': f'autogen.{_modname}.{name}',\n"
         "          'title': name,\n"
+    "          'desc': _short_doc(obj),\n"
     "          'category': _cat2,\n"
         "          'inputType': 'Any',\n"
         "          'outputType': 'Any',\n"
-        "          'params': params,\n"
+    "          'params': params,\n"
     "          'pkg': _root2,\n"
-        "          'call': { 'target': f'{_modname}.{name}', 'kind': 'function', 'receiver': None, 'dfParam': None, 'returnsSelf': False }\n"
+    "          'call': { 'target': f'{_modname}.{name}', 'kind': 'function', 'receiver': None, 'dfParam': (params[0]['name'] if (isinstance(params,list) and len(params)>0 and isinstance(params[0],dict) and 'name' in params[0]) else None), 'srcParams': ([p['name'] for p in params][:2] if isinstance(params,list) else []), 'returnsSelf': False }\n"
         "        })\n"
         "      elif inspect.isclass(obj):\n"
     "        params = _param_specs(obj)\n"
@@ -784,35 +1227,38 @@ def _introspect_module_code(mod: str, include: str, exclude: str, limit: int) ->
         "        _out.append({\n"
         "          'id': f'autogen.{_modname}.{name}',\n"
         "          'title': name,\n"
+    "          'desc': _short_doc(obj),\n"
     "          'category': 'Estimator' if hasattr(obj, 'fit') else _cat2,\n"
         "          'inputType': 'Any',\n"
         "          'outputType': 'Estimator' if hasattr(obj, 'fit') else 'Any',\n"
         "          'params': params,\n"
     "          'pkg': _root2,\n"
-        "          'call': { 'target': f'{_modname}.{name}', 'kind': 'constructor', 'receiver': None, 'dfParam': None, 'returnsSelf': False }\n"
+        "          'call': { 'target': f'{_modname}.{name}', 'kind': 'constructor', 'receiver': None, 'dfParam': None, 'srcParams': [], 'returnsSelf': False }\n"
         "        })\n"
         "        # fit/predict shortcuts if available\n"
         "        if hasattr(obj, 'fit'):\n"
         "          _out.append({\n"
         "            'id': f'autogen.{_modname}.{name}.fit',\n"
         "            'title': f'{name}.fit',\n"
+        "            'desc': _short_doc(getattr(obj,'fit', None)),\n"
         "            'category': 'Estimator',\n"
         "            'inputType': 'Any',\n"
         "            'outputType': 'Estimator',\n"
     "            'params': _param_specs(getattr(obj,'fit', None)) if hasattr(obj,'fit') else [],\n"
     "            'pkg': _root2,\n"
-        "            'call': { 'target': f'{_modname}.{name}.fit', 'kind': 'method', 'receiver': 'estimator', 'dfParam': 'X', 'returnsSelf': True }\n"
+    "            'call': { 'target': f'{_modname}.{name}.fit', 'kind': 'method', 'receiver': 'estimator', 'dfParam': 'X', 'srcParams': ['X','y'], 'returnsSelf': True }\n"
         "          })\n"
         "        if hasattr(obj, 'predict'):\n"
         "          _out.append({\n"
         "            'id': f'autogen.{_modname}.{name}.predict',\n"
         "            'title': f'{name}.predict',\n"
+        "            'desc': _short_doc(getattr(obj,'predict', None)),\n"
         "            'category': 'Estimator',\n"
         "            'inputType': 'Any',\n"
         "            'outputType': 'Any',\n"
     "            'params': _param_specs(getattr(obj,'predict', None)) if hasattr(obj,'predict') else [],\n"
     "            'pkg': _root2,\n"
-        "            'call': { 'target': f'{_modname}.{name}.predict', 'kind': 'method', 'receiver': 'estimator', 'dfParam': 'X', 'returnsSelf': False }\n"
+    "            'call': { 'target': f'{_modname}.{name}.predict', 'kind': 'method', 'receiver': 'estimator', 'dfParam': 'X', 'srcParams': ['X'], 'returnsSelf': False }\n"
         "          })\n"
         "    except Exception:\n"
         "      pass\n"
