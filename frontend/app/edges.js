@@ -29,7 +29,21 @@ export function drawEdges(state, edgesSvg, nodesRoot, canvasWrap) {
     const to = nodesRoot.querySelector(`[data-node-id="${e.to}"]`);
     if (!from || !to) return;
     const a = centerOf(from.querySelector('.port.out'), edgesSvg);
-    const b = centerOf(to.querySelector('.port.in'), edgesSvg);
+    // Prefer a specific parameter port if present and bound to this edge
+    // If the target node has a .pf-field with data-bound referencing the source var, use its .param-port.
+    let paramPort = null;
+    try {
+      const fields = Array.from(to.querySelectorAll('.pf-field'));
+      const hit = fields.find(f => {
+        const bound = f.getAttribute('data-bound');
+        if (!bound) return false;
+        // Source runtime variable name pattern: v_<id>
+        return bound.indexOf('v_' + e.from.replace(/[^a-zA-Z0-9_]/g, '')) >= 0;
+      });
+      if (hit) paramPort = hit.querySelector('.param-port');
+    } catch {}
+    if (!paramPort) paramPort = to.querySelector('.param-port') || to.querySelector('.port.in');
+    const b = centerOf(paramPort, edgesSvg);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     const dx = Math.abs(b.x - a.x) * 0.5;
     const d = `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;

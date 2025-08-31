@@ -77,80 +77,12 @@ export function initWS(deps){
                 const js = await res.json().catch(()=>({}));
                 const arr = Array.isArray(js.nodes) ? js.nodes : [];
                 if(arr.length){
+                  // Use the shared autogen def builder for robustness/consistency
+                  const { makeAutogenDef } = await import('./nodes.js');
                   for(const spec of arr){
-                    const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
+                    const def = makeAutogenDef(spec);
+                    const id = def.id;
                     if(deps.registry.nodes.has(id)) continue;
-                    const def = {
-                      id,
-                      title: spec.title || id,
-                      category: spec.category || 'Auto',
-                      inputType: spec.inputType || 'Any',
-                      outputType: spec.outputType || 'Any',
-                      defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
-                      form(node){
-                        const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
-                        const fields = (spec.params||[]).filter(p=> !p.hidden);
-                        function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
-                        function inputFor(p){ const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string'; if(ui==='select' && Array.isArray(p.enum)){ const opts=p.enum.map(x=>`<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join(''); return `<label>${label}</label><select name="${name}">${opts}</select>`; } if(ui==='textarea'){ return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`; } return `<label>${label}</label><input name="${name}" value="${val||''}">`; }
-                        const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
-                        const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
-                        return `${basic}${adv? `<details style="margin-top:8px"><summary style="cursor:pointer; user-select:none">Advanced</summary>${adv}</details>`:''}`;
-                      },
-                      code(node, ctx){
-                        const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-                        const p = node.params||{};
-                        const call = spec.call || {};
-                        const params = (spec.params||[])
-                          .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
-                          .filter(x=> p[x.name]!==undefined)
-                          .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`)
-                          .join(', ');
-                        const target = call.target || '';
-                        const parts = target.split('.');
-                        const root = parts[0] || '';
-                        const modPath = parts.slice(0, -1).join('.');
-                        const seg = [];
-                        if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
-                        if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
-                        const src = (ctx && typeof ctx.srcVar==='function') ? ctx.srcVar(node) : null;
-                        const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : (src? [src]: []);
-                        const dfParam = call.dfParam || null;
-                        if(call.kind==='function'){
-                          if(dfParam && src){
-                            const argz = [];
-                            argz.push(`${dfParam}=${src}`);
-                            if(params) argz.push(params);
-                            seg.push(`${v} = ${target}(${argz.join(', ')})`);
-                          } else {
-                            seg.push(`${v} = ${target}(${params})`);
-                          }
-                        } else if(call.kind==='constructor'){
-                          seg.push(`${v} = ${target}(${params})`);
-                        } else if(call.kind==='method'){
-                          let recv = srcs[0] || src;
-                          const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
-                          if(!recv && call.receiver && call.receiver!=='estimator'){
-                            recv = `globals().get('${call.receiver}', None)`;
-                          }
-                          const meth = target.split('.').slice(-1)[0];
-                          if(recv){
-                            const argz = [];
-                            if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
-                            if(params) argz.push(params);
-                            const joined = argz.join(', ');
-                            if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
-                            else seg.push(`${v} = ${recv}.${meth}(${joined})`);
-                            if(call.returnsSelf) seg.push(`${v} = ${recv}`);
-                          } else {
-                            seg.push(`${v} = ${target}(${params})`);
-                          }
-                        } else {
-                          seg.push(`${v} = ${target}(${params})`);
-                        }
-                        seg.push(`print(${v})`);
-                        return seg;
-                      }
-                    };
                     deps.registry.nodes.set(id, def);
                     const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
                     if(!deps.registry.packages.some(p=> p.name===pkgName)) deps.registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });

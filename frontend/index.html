@@ -4,23 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PythonFlows</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header>
     <h1>FlowPython MVP</h1>
-    <div style="margin-left:auto; color:var(--sub); font-size:12px">Drag nodes, connect, then Run. Images appear in Plot node.</div>
+  <div id="headerHint" style="color:var(--sub); font-size:12px">Drag nodes, connect (Out port → parameter dot), then Run. Images appear in Plot node.</div>
+    <div id="headerControls" aria-label="Global actions"></div>
   </header>
   <div id="app">
     <div id="leftCol">
       <aside id="sidebar">
         <div id="toolbar"></div>
       </aside>
-      <div id="actions">
-        <button id="installBtn" class="warn">Install / Check</button>
-        <button id="restartBtn" class="secondary">Restart Kernel</button>
-        <button id="sampleBtn" class="secondary">Sample</button>
-      </div>
     </div>
     <section id="canvasWrap">
       <svg id="edges"></svg>
@@ -58,10 +55,10 @@
       </div>
       <div id="rightPkgs" style="display:none; height:100%; overflow:auto;">
         <div style="padding:10px; border-bottom:1px solid #1f2329; font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:8px;">
-          <span>Available Packages</span>
-          <span style="font-size:12px; color:#9ba3af;">ロード済みのノードパッケージ一覧</span>
+          <span>Packages</span>
+          <span style="font-size:12px; color:#9ba3af;">左: インポート済み • 右: 未インポート（ドラッグでインポート）</span>
         </div>
-        <div id="pkgsWrap" style="padding:10px"></div>
+        <div id="pkgsWrap" class="pkg-board" style="padding:10px"></div>
       </div>
     </aside>
   </div>

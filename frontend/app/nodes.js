@@ -19,6 +19,8 @@ export const state = {
 };
 
 export const registry = { packages: [], nodes: new Map(), byPackage: new Map() };
+// Track which JS packages have already executed their register() to avoid duplicate node lists
+const __loadedPackages = new Set();
 
 // Build a dynamic node definition from an autogen spec
 // Spec shape: { id, title, category, inputType, outputType, params:[{name, default, ui, hidden?, advanced?, when?}],
@@ -31,6 +33,8 @@ export function makeAutogenDef(spec){
     category: spec.category || 'Auto',
     inputType: spec.inputType || 'Any',
     outputType: spec.outputType || 'Any',
+    // mark as autogen for UI優先度
+    origin: 'autogen',
     defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
     form(node){
       const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
@@ -39,23 +43,25 @@ export function makeAutogenDef(spec){
       function inputFor(p){
         const name = p.name; const label = p.label||name; const val = v[name] ?? p.default ?? '';
         const ui = String(p.ui||'string').toLowerCase();
+        const head = `<div class="pf-label"><span class="param-port" data-param="${name}" title="Connect input to ${name}"></span><span>${label}</span></div>`;
+        const bound = v['__bound__'+name] || '';
         if(ui==='select' && Array.isArray(p.enum)){
           const opts = p.enum.map(x=> `<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join('');
-          return `<label>${label}</label><select name="${name}">${opts}</select>`;
+          return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<select name="${name}">${opts}</select></div>`;
         }
         if(ui==='bool'){
-          const on = String(val)==='true' || val===true; return `<label>${label}</label><select name="${name}"><option value="false" ${!on?'selected':''}>false</option><option value="true" ${on?'selected':''}>true</option></select>`;
+          const on = String(val)==='true' || val===true; return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<select name="${name}"><option value="false" ${!on?'selected':''}>false</option><option value="true" ${on?'selected':''}>true</option></select></div>`;
         }
         if(ui==='number'){
-          const num = (val===null||val===undefined)? '' : String(val); return `<label>${label}</label><input type="number" step="any" name="${name}" value="${num}">`;
+          const num = (val===null||val===undefined)? '' : String(val); return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<input type="number" step="any" name="${name}" value="${num}"></div>`;
         }
         if(ui==='textarea'){
-          return `<label>${label}</label><textarea name="${name}">${val||''}</textarea>`;
+          return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<textarea name="${name}">${val||''}</textarea></div>`;
         }
         if(ui==='upload'){
-          return `<label>${label}</label><div style="display:flex; gap:6px"><input name="${name}" value="${val||''}" placeholder="Uploaded filename" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div>`;
+          return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<div style="display:flex; gap:6px"><input name="${name}" value="${val||''}" placeholder="Uploaded filename" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div></div>`;
         }
-        return `<label>${label}</label><input name="${name}" value="${val||''}">`;
+        return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<input name="${name}" value="${val||''}"></div>`;
       }
       const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
       const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
@@ -66,15 +72,19 @@ export function makeAutogenDef(spec){
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const p = node.params||{};
       const call = spec.call || {};
-      const params = Array.isArray(spec.params)? spec.params : [];
+      const paramsSpec = Array.isArray(spec.params)? spec.params : [];
       const src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || null) : null;
       const srcs = (ctx && typeof ctx.srcVars==='function') ? (ctx.srcVars(node) || []) : (src? [src] : []);
-      const provided = new Set(Object.keys(p||{}).filter(k=> p[k]!==undefined));
-      const activeParams = params.filter(x=> (!x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||'')));
-      const kwargs = activeParams
-        .filter(x=> p[x.name]!==undefined && x.name!=='mode' && x.name!=='inline' && x.name!=='path' && x.name!=='upload' && x.name!=='dir')
-        .map(x=> `${x.name}=${JSON.stringify(p[x.name])}`);
-      const addKw = (k, expr)=>{ const key = String(k||''); if(key && !provided.has(key)) kwargs.unshift(`${key}=${expr}`); };
+      const provided = new Set();
+      const activeParams = paramsSpec.filter(x=> (!x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||'')));
+      const kwargs = [];
+      for(const x of activeParams){
+        if(['mode','inline','path','upload','dir'].includes(x.name)) continue;
+        const bound = p['__bound__'+x.name];
+        if(bound!=null){ kwargs.push(`${x.name}=_fp_as_scalar(${bound})`); provided.add(x.name); continue; }
+        if(p[x.name]!==undefined){ kwargs.push(`${x.name}=${JSON.stringify(p[x.name])}`); provided.add(x.name); }
+      }
+      const addKw = (k, expr)=>{ const key = String(k||''); if(key && !provided.has(key)) { kwargs.unshift(`${key}=${expr}`); provided.add(key); } };
       const target = call.target || 'None';
       const parts = String(target).split('.');
       const root = parts[0] || '';
@@ -90,7 +100,7 @@ export function makeAutogenDef(spec){
         const recv = srcs[0] || src || 'None';
         const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
         const argz = [];
-        if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
+        if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=_fp_as_scalar(${dataVar})`);
         if(kwargs.length) argz.push(...kwargs);
         const joined = argz.join(', ');
         if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${kwargs.join(', ')})`);
@@ -99,15 +109,13 @@ export function makeAutogenDef(spec){
       } else if(kind==='constructor'){
         seg.push(`${v} = ${target}(${kwargs.join(', ')})`);
       } else { // function
-        // Map multiple upstreams to srcParams when provided
         if(srcs && srcs.length){
           for(let i=0; i<Math.min(srcs.length, srcParams.length); i++){
-            const k = srcParams[i]; const s = srcs[i]; if(k){ addKw(k, String(s)); }
+            const k = srcParams[i]; const s = srcs[i]; if(k){ addKw(k, `_fp_as_scalar(${String(s)})`); }
           }
-          // If dfParam defined but not in srcParams and still not provided, map first src
-          if(dfParam && !srcParams.includes(dfParam) && srcs[0]) addKw(dfParam, String(srcs[0]));
+          if(dfParam && !srcParams.includes(dfParam) && srcs[0]) addKw(dfParam, `_fp_as_scalar(${String(srcs[0])})`);
         } else if(src && dfParam){
-          addKw(dfParam, String(src));
+          addKw(dfParam, `_fp_as_scalar(${String(src)})`);
         } else if(src){
           const names = activeParams.map(x=> x.name); const want = names[0] || null; if(want && !provided.has(want)) addKw(want, String(src));
         }
@@ -380,7 +388,8 @@ export function setPreviewModeProvider(fn){ if(typeof fn==='function') previewMo
 export function genCode(){
   const pmode = previewModeProvider();
   const order = topoSort();
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
+  // Build minimal header; add pandas/matplotlib only if needed by nodes
+  const header = [ 'import io', 'import glob', 'import importlib',
     '# --- FlowPython helpers (shared) ---',
     '__pf_imports = globals().get("__pf_imports", {})',
     'def _fp_register_import(mod, alias=None):',
@@ -420,7 +429,7 @@ export function genCode(){
     '    except Exception:',
     '        return None',
     '',
-    'def _fp_set_globals(text):',
+  'def _fp_set_globals(text):',
     '    lines = str(text).splitlines()',
     '    env = _fp_env()',
     '    for __ln in lines:',
@@ -469,9 +478,48 @@ export function genCode(){
     '        return False',
     '    d[nid] = h',
     '    globals()["__pf_hash"] = d',
-    '    return True'
+  '    return True',
+  '',
+  'def _fp_as_scalar(x):',
+  '    try:',
+  '        import pandas as _pd',
+  '        if isinstance(x, _pd.DataFrame):',
+  '            try:',
+  '                if getattr(x, "size", 0) == 1:',
+  '                    return x.values.tolist()[0][0]',
+  '                if "text" in x.columns and len(x)==1:',
+  '                    return str(x["text"].iloc[0])',
+  '            except Exception: pass',
+  '            try:',
+  '                return str(x.iloc[0,0])',
+  '            except Exception:',
+  '                return str(x)',
+  '        import numpy as _np',
+  '        if isinstance(x, _np.ndarray):',
+  '            try: return x.item()',
+  '            except Exception: pass',
+  '        if isinstance(x, (list, tuple)) and len(x)==1:',
+  '            return x[0]',
+  '        return x',
+  '    except Exception:',
+  '        return x'
   ];
-  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
+  // Determine required optional imports from node types in this run
+  const types = order.map(n=> n?.type||'');
+  const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
+  const pandasPythonNodes = new Set([
+    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
+    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
+    'python.Enumerate','python.Assert','python.Repeat'
+  ]);
+  const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
+  const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
+  const plottingNodes = new Set(['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.CorrHeatmap','sklearn.ClusterPlot']);
+  const needsMatplotlib = types.some(t=> plottingNodes.has(t));
+  const lines = [...header];
+  if(needsPandas){ lines.push('import pandas as pd'); lines.push("_fp_register_import('pandas','pd')"); }
+  if(needsMatplotlib){ lines.push('import matplotlib.pyplot as plt'); lines.push('plt.close("all")'); lines.push("_fp_register_import('matplotlib.pyplot','plt')"); }
+  const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
@@ -501,7 +549,8 @@ export function genCodeForNodes(ids, includeUpstream=true){
   } else {
     targets.forEach(id=> keep.add(id));
   }
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
+  // Build minimal header; add pandas/matplotlib only if needed by kept nodes
+  const header = [ 'import io', 'import glob', 'import importlib',
     '# --- FlowPython helpers (shared) ---',
     '__pf_imports = globals().get("__pf_imports", {})',
     'def _fp_register_import(mod, alias=None):',
@@ -590,9 +639,49 @@ export function genCodeForNodes(ids, includeUpstream=true){
   '        return False',
   '    d[nid] = h',
   '    globals()["__pf_hash"] = d',
-  '    return True'
+  '    return True',
+  '',
+  'def _fp_as_scalar(x):',
+  '    try:',
+  '        import pandas as _pd',
+  '        if isinstance(x, _pd.DataFrame):',
+  '            try:',
+  '                if getattr(x, "size", 0) == 1:',
+  '                    return x.values.tolist()[0][0]',
+  '                if "text" in x.columns and len(x)==1:',
+  '                    return str(x["text"].iloc[0])',
+  '            except Exception: pass',
+  '            try:',
+  '                return str(x.iloc[0,0])',
+  '            except Exception:',
+  '                return str(x)',
+  '        import numpy as _np',
+  '        if isinstance(x, _np.ndarray):',
+  '            try: return x.item()',
+  '            except Exception: pass',
+  '        if isinstance(x, (list, tuple)) and len(x)==1:',
+  '            return x[0]',
+  '        return x',
+  '    except Exception:',
+  '        return x'
   ];
-  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
+  // Determine required optional imports from node types participating in this run
+  const keptOrder = order.filter(n=> keep.has(n.id));
+  const types = keptOrder.map(n=> n?.type||'');
+  const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
+  const pandasPythonNodes = new Set([
+    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
+    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
+    'python.Enumerate','python.Assert','python.Repeat'
+  ]);
+  const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
+  const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
+  const plottingNodes = new Set(['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.CorrHeatmap','sklearn.ClusterPlot']);
+  const needsMatplotlib = types.some(t=> plottingNodes.has(t));
+  const lines = [...header];
+  if(needsPandas){ lines.push('import pandas as pd'); lines.push("_fp_register_import('pandas','pd')"); }
+  if(needsMatplotlib){ lines.push('import matplotlib.pyplot as plt'); lines.push('plt.close("all")'); lines.push("_fp_register_import('matplotlib.pyplot','plt')"); }
+  const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
@@ -611,7 +700,8 @@ export function genCodeForNodes(ids, includeUpstream=true){
 export function genCodeUpTo(targetId){
   const pmode = previewModeProvider();
   const order = topoSort(); const keep = new Set(); const backAdj = {}; state.edges.forEach(e=>{ (backAdj[e.to] ||= []).push(e.from); }); const stack = [targetId]; while(stack.length){ const u = stack.pop(); if(!u || keep.has(u)) continue; keep.add(u); (backAdj[u]||[]).forEach(v=> stack.push(v)); }
-  const header = [ 'import pandas as pd', 'import matplotlib.pyplot as plt', 'import io', 'import glob', 'import importlib', 'plt.close("all")',
+  // Build minimal header; add pandas/matplotlib only if needed by kept nodes
+  const header = [ 'import io', 'import glob', 'import importlib',
     '# --- FlowPython helpers (shared) ---',
     '__pf_imports = globals().get("__pf_imports", {})',
     'def _fp_register_import(mod, alias=None):',
@@ -700,9 +790,49 @@ export function genCodeUpTo(targetId){
   '        return False',
   '    d[nid] = h',
   '    globals()["__pf_hash"] = d',
-  '    return True'
+  '    return True',
+  '',
+  'def _fp_as_scalar(x):',
+  '    try:',
+  '        import pandas as _pd',
+  '        if isinstance(x, _pd.DataFrame):',
+  '            try:',
+  '                if getattr(x, "size", 0) == 1:',
+  '                    return x.values.tolist()[0][0]',
+  '                if "text" in x.columns and len(x)==1:',
+  '                    return str(x["text"].iloc[0])',
+  '            except Exception: pass',
+  '            try:',
+  '                return str(x.iloc[0,0])',
+  '            except Exception:',
+  '                return str(x)',
+  '        import numpy as _np',
+  '        if isinstance(x, _np.ndarray):',
+  '            try: return x.item()',
+  '            except Exception: pass',
+  '        if isinstance(x, (list, tuple)) and len(x)==1:',
+  '            return x[0]',
+  '        return x',
+  '    except Exception:',
+  '        return x'
   ];
-  const lines = [...header, "_fp_register_import('pandas','pd')", "_fp_register_import('matplotlib.pyplot','plt')"]; const varOf = {}; const ctx = {
+  // Determine required optional imports from node types participating in this run
+  const keptOrder = order.filter(n=> keep.has(n.id));
+  const types = keptOrder.map(n=> n?.type||'');
+  const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
+  const pandasPythonNodes = new Set([
+    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
+    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
+    'python.Enumerate','python.Assert','python.Repeat'
+  ]);
+  const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
+  const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
+  const plottingNodes = new Set(['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.CorrHeatmap','sklearn.ClusterPlot']);
+  const needsMatplotlib = types.some(t=> plottingNodes.has(t));
+  const lines = [...header];
+  if(needsPandas){ lines.push('import pandas as pd'); lines.push("_fp_register_import('pandas','pd')"); }
+  if(needsMatplotlib){ lines.push('import matplotlib.pyplot as plt'); lines.push('plt.close("all")'); lines.push("_fp_register_import('matplotlib.pyplot','plt')"); }
+  const varOf = {}; const ctx = {
     srcVar: (node)=> varOf[upstreamOf(node)?.id],
     srcVars: (node)=> upstreamsOf(node).map(n=> varOf[n?.id]).filter(Boolean),
     varOfId: (id)=> varOf[id],
@@ -722,16 +852,29 @@ export async function loadPackages(){
   try{
     const res = await fetch('/api/packages');
     const list = await res.json();
-  const serverPkgs = Array.isArray(list) ? list.map(x=> ({name:x.name, label:x.label, entry:x.entry})) : [];
-  // Preserve any pre-registered dynamic packages (e.g., autogen) by merging extras
-  const extras = (registry.packages||[]).filter(p=> !serverPkgs.some(sp=> sp.name===p.name));
-  registry.packages = [...serverPkgs, ...extras];
+    const serverPkgs = Array.isArray(list) ? list.map(x=> ({name:x.name, label:x.label, entry:x.entry})) : [];
+    // Preserve any pre-registered dynamic packages (e.g., autogen) by merging extras
+    const extras = (registry.packages||[]).filter(p=> !serverPkgs.some(sp=> sp.name===p.name));
+    registry.packages = [...serverPkgs, ...extras];
     for(const p of (Array.isArray(list)? list: [])){
       try{
+        // Avoid re-running register() for the same package; it would duplicate left-pane nodes
+        if(__loadedPackages.has(p.name)) continue;
         const mod = await import(`/pkg/${p.name}/${p.entry}`);
         if(mod && typeof mod.register==='function'){
-          const reg = { node(def){ if(!def || !def.id) return; registry.nodes.set(def.id, def); const pkgName = p.name; if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []); registry.byPackage.get(pkgName).push(def.id); } };
+          const reg = { 
+            node(def){
+              if(!def || !def.id) return;
+              // upsert the node definition
+              registry.nodes.set(def.id, def);
+              const pkgName = p.name;
+              if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+              const arr = registry.byPackage.get(pkgName);
+              if(!arr.includes(def.id)) arr.push(def.id);
+            }
+          };
           mod.register(reg);
+          __loadedPackages.add(p.name);
         } else {
           console.warn('[packages] no register() exported by', p.name);
         }
@@ -739,6 +882,8 @@ export async function loadPackages(){
         try{ console.warn('[packages] failed to load', p?.name, e); }catch{}
       }
     }
+    // Ensure byPackage lists remain unique
+    try{ registry.byPackage.forEach((arr, k)=>{ const uniq = Array.from(new Set(arr)); registry.byPackage.set(k, uniq); }); }catch{}
     state.activePkg = registry.packages[0]?.name || null;
   }catch{
     registry.packages = [];

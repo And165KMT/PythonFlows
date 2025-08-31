@@ -1,5 +1,5 @@
 import './app/ui.js';
-import { registry, makeAutogenDef } from './app/nodes.js';
+import { registry, makeAutogenDef, loadPackages } from './app/nodes.js';
 let __pf_actionsRO = null; // single ResizeObserver for actions area
 
 async function loadAutogen(){
@@ -54,7 +54,10 @@ window.addEventListener('resize', setViewportVars);
 window.addEventListener('orientationchange', setViewportVars);
 window.addEventListener('load', setViewportVars);
 
-await loadAutogen();
+// Load declared packages first for UI (do not pre-register Autogen nodes to keep toggles OFF)
+try{ await loadPackages(); }catch{}
+// Note: We intentionally do NOT call loadAutogen() here to avoid auto-importing packages.
+// Autogen nodes will be generated on-demand when the user toggles a package or installs from PyPI.
 try{ if(window.__PF_boot) window.__PF_boot(); }catch{}
 // Recompute and observe actions height once DOM is ready
 try{
