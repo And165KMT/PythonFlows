@@ -1,4 +1,4 @@
-import { pasteSubgraph, setSelection, createGroup } from './nodes.js';
+import { pasteSubgraph, setSelection, createGroup, addNode, getNode, state } from './nodes.js';
 import { setGhost as setGhostMod } from './edges.js';
 import { openContextMenu, closeContextMenu } from './contextmenu.js';
 
@@ -47,7 +47,7 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
           return;
         }
       }
-    }catch{}
+  }catch(e){}
     selecting = true;
     const rect = canvasWrap.getBoundingClientRect();
     selStartScreen = { x: e.clientX, y: e.clientY };
@@ -69,7 +69,7 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
         if (!canvasWrap.contains(e.target)) return;
         const r = edgesSvg.getBoundingClientRect();
         setGhostMod(state, edgesSvg, e.clientX - r.left, e.clientY - r.top);
-      } catch {}
+  } catch (e) {}
     }
     if (!selecting) return;
     const rect = canvasWrap.getBoundingClientRect();
@@ -109,7 +109,7 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
         if(!id) return;
         if(S.has(id)) el.classList.add('selected'); else el.classList.remove('selected');
       });
-    }catch{}
+  }catch(e){}
   });
 
   window.addEventListener('mouseup', () => {
@@ -229,14 +229,14 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
   canvasWrap.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.node')) return;
     e.preventDefault();
-    const items = [
+  const items = [
       { key: 'paste', label: 'Paste', disabled: !window.__pf_clipboardGraph, onClick: () => {
           const g = window.__pf_clipboardGraph; if (!g) return;
           try {
             const wpt = screenToWorldPoint(e.clientX, e.clientY);
             const newIds = pasteSubgraph(g, { x: (wpt.x || 0) + 40, y: (wpt.y || 0) + 40 }) || [];
             if (newIds && newIds.length) setSelection(newIds);
-          } catch {}
+          } catch (e) {}
         }
       },
       { key: 'group', label: 'Group selection', disabled: !(state.selection && state.selection.size>0), onClick: ()=>{
@@ -245,7 +245,22 @@ export function initInteractions({ state, canvasWrap, nodesEl, edgesSvg, getScal
             if(ids.length){ createGroup('Subsystem', ids); }
             // UI側に再描画を促す（renderSubsystems/renderGroups呼び出しはui.js内）
             document.dispatchEvent(new CustomEvent('pf:groups:changed'));
-          }catch{}
+          }catch(e){}
+        } },
+      { key: 'group_foreach', label: 'Group selection → ForEach template', disabled: !(state.selection && state.selection.size>0), onClick: ()=>{
+          try{
+            const ids = Array.from(state.selection||[]);
+            if(!ids.length) return;
+            const gid = createGroup('Subsystem', ids);
+            // 位置: 選択ノードの重心の右側へ
+            const pts = ids.map(id=> getNode(id)).filter(Boolean);
+            const cx = pts.length ? pts.reduce((a,n)=> a + (n.x||0),0)/pts.length : 120;
+            const cy = pts.length ? pts.reduce((a,n)=> a + (n.y||0),0)/pts.length : 80;
+            const n = addNode('python.ForEach', cx + 180, cy);
+            n.params = Object.assign({}, n.params || {}, { group: gid });
+            setSelection([n.id]);
+            document.dispatchEvent(new CustomEvent('pf:groups:changed'));
+          }catch(e){}
         } }
     ];
     openContextMenu(items, e.clientX, e.clientY);

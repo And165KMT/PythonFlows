@@ -41,7 +41,7 @@ export function drawEdges(state, edgesSvg, nodesRoot, canvasWrap) {
         return bound.indexOf('v_' + e.from.replace(/[^a-zA-Z0-9_]/g, '')) >= 0;
       });
       if (hit) paramPort = hit.querySelector('.param-port');
-    } catch {}
+  } catch (e) {}
     if (!paramPort) paramPort = to.querySelector('.param-port') || to.querySelector('.port.in');
     const b = centerOf(paramPort, edgesSvg);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');

@@ -2,6 +2,13 @@
   --bg: #0e1116; --panel: #161b22; --text: #e6edf3; --sub: #9ba3af;
   --accent: #1f6feb; --ok: #2ea043; --warn: #d29922; --err: #f85149;
   --right-w: 380px;
+  /* badge colors (dark default) */
+  --badge-ok-bg: rgba(46,160,67,0.18);
+  --badge-ok-fg: #9ae6a7;
+  --badge-ok-border: rgba(46,160,67,0.35);
+  --badge-ng-bg: rgba(248,81,73,0.18);
+  --badge-ng-fg: #ffb4b4;
+  --badge-ng-border: rgba(248,81,73,0.35);
   /* glass preset */
   --glass-bg: rgba(15, 21, 32, 0.55);
   --glass-border: rgba(255, 255, 255, 0.08);
@@ -9,6 +16,25 @@
   /* runtime.js で設定される可変値 */
   --vh: 1vh;
   --header-h: 53px;
+}
+/* Light theme overrides */
+:root[data-theme="light"] {
+  --badge-ok-bg: rgba(34,197,94,0.18);
+  --badge-ok-fg: #047857;
+  --badge-ok-border: rgba(34,197,94,0.35);
+  --badge-ng-bg: rgba(239,68,68,0.18);
+  --badge-ng-fg: #b91c1c;
+  --badge-ng-border: rgba(239,68,68,0.35);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --badge-ok-bg: rgba(34,197,94,0.18);
+    --badge-ok-fg: #047857;
+    --badge-ok-border: rgba(34,197,94,0.35);
+    --badge-ng-bg: rgba(239,68,68,0.18);
+    --badge-ng-fg: #b91c1c;
+    --badge-ng-border: rgba(239,68,68,0.35);
+  }
 }
 html, body { height: 100%; overflow: hidden; }
 body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
@@ -148,6 +174,14 @@ header h1 { margin: 0; font-size: 18px; }
 /* Package toggle row */
 .pkg-toggle { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 10px; border:1px solid #263041; border-radius:8px; background:#0b1220; }
 .pkg-toggle .meta { color:#9ba3af; font-size:12px; }
+
+/* Autogen test badges */
+.badge { display:inline-flex; align-items:center; justify-content:center; padding:1px 6px; height:18px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:0.2px; line-height:1; border:1px solid transparent; }
+.badge + .badge { margin-left:4px; }
+.badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); border-color: var(--badge-ok-border); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--badge-ok-border) 45%, transparent); }
+.badge-ng { background: var(--badge-ng-bg); color: var(--badge-ng-fg); border-color: var(--badge-ng-border); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--badge-ng-border) 45%, transparent); }
+.pkg-toggle .badge { margin-left:4px; }
+.pkg-toggle .badge[title] { cursor: default; }
 .switch { position: relative; display:inline-block; width:42px; height:22px; }
 .switch input { opacity:0; width:0; height:0; }
 .slider { position:absolute; cursor:pointer; inset:0; background:#263041; transition:.2s; border-radius:999px; }

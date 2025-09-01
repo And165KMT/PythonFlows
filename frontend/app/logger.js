@@ -9,12 +9,12 @@ export function appendLog(message, level = 'info') {
     line.textContent = String(message);
     log.appendChild(line);
     log.scrollTop = log.scrollHeight;
-  } catch {}
+  } catch (e) {}
 }
 
 export function clearLog() {
   try {
     const log = document.getElementById('log');
     if (log) log.innerHTML = '';
-  } catch {}
+  } catch (e) {}
 }

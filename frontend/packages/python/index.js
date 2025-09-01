@@ -84,11 +84,11 @@ except Exception as _e:
     }
   });
 
-  // --- ListCreate: simple DataFrame source from a comma-separated list ---
+  // --- ListCreate: simple list source from a comma-separated list (pandas不要) ---
   reg.node({
     id: 'python.ListCreate', title: 'ListCreate', category: 'Sources',
     inputType: 'None',
-    outputType: 'DataFrame',
+    outputType: 'Any',
     defaultParams: { values: '1,2,3', column: 'value', as: 'number' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>values (comma-separated)</label>
@@ -103,36 +103,36 @@ except Exception as _e:
       <input name="column" value="${v.column||'value'}" placeholder="value">
       <div style="font-size:12px; opacity:0.8; margin-top:6px;">Creates a one-column DataFrame from the list.</div>
     `; },
-    code(node){
-      const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-      const raw = String(node.params?.values ?? '').replace(/`/g,'');
-      const col = String(node.params?.column ?? 'value').replace(/`/g,'');
-      const as  = String(node.params?.as ?? 'number').replace(/`/g,'');
-      return [
-        `__raw = r'''${raw}'''`,
-        `__parts = [s.strip() for s in (__raw.split(',') if __raw else [])]`,
-        `__vals = []`,
-        `__as = r'''${as}'''`,
-        `for __s in __parts:
-    if not __s:
-        continue
-    if __as == 'string':
-        __vals.append(__s)
-    elif __as == 'number':
-        try:
-            __vals.append(float(__s))
-        except Exception:
-            __vals.append(float('nan'))
-    else:
-        # auto: try number, else string
-        try:
-            __vals.append(float(__s))
-        except Exception:
-            __vals.append(__s)`,
-        `${v} = pd.DataFrame({r'''${col}''': __vals})`,
-        `print(${v}.head().to_string())`
-      ];
-    }
+  code(node){
+    const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+    const raw = String(node.params?.values ?? '').replace(/`/g,'');
+    const col = String(node.params?.column ?? 'value').replace(/`/g,'');
+    const as  = String(node.params?.as ?? 'number').replace(/`/g,'');
+    return [
+    `__raw = r'''${raw}'''`,
+    `__parts = [s.strip() for s in (__raw.split(',') if __raw else [])]`,
+    `__vals = []`,
+    `__as = r'''${as}'''`,
+    `for __s in __parts:
+  if not __s:
+    continue
+  if __as == 'string':
+    __vals.append(__s)
+  elif __as == 'number':
+    try:
+      __vals.append(float(__s))
+    except Exception:
+      __vals.append(None)
+  else:
+    # auto: try number, else string
+    try:
+      __vals.append(float(__s))
+    except Exception:
+      __vals.append(__s)`,
+    `${v} = [{r'''${col}''': x} for x in __vals]`,
+    `print(repr(${v}[:5]))`
+    ];
+  }
   });
   // --- Globals: Set multiple kernel-level variables ---
   reg.node({
@@ -177,7 +177,7 @@ except Exception as _e:
         if(gname && !cols.includes(gname)) cols.push(gname);
         if(gname && !v.input){ v.input = gname; }
       }
-    }catch{}
+  }catch(e){}
     const opts = cols.map(c=>`<option value="${c}">${c}</option>`).join('');
     const listId = `cols-${node.id}`; const active = (op)=> v.op===op? 'style="background:#1f6feb;color:#fff;border-color:#1f6feb"' : '';
     return `
@@ -253,11 +253,11 @@ else:
     }
   });
 
-  // --- GetGlobal: fetch an existing global variable into a 1-row DataFrame ---
+  // --- GetGlobal: fetch an existing global variable (list-of-dictsに変換) ---
   reg.node({
     id: 'python.GetGlobal', title: 'GetGlobal', category: 'Globals',
   inputType: 'None',
-  outputType: 'DataFrame',
+  outputType: 'Any',
     defaultParams: { name: 'alpha' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>variable name</label>
@@ -269,17 +269,17 @@ else:
       const name = (node.params?.name||'').replace(/`/g,'');
       return [
         `__val = globals().get(r'''${name}''', None)`,
-        `${v} = pd.DataFrame({'name':[r'''${name}'''], 'type':[type(__val).__name__], 'repr':[repr(__val)[:200]], 'value':[__val]})`,
-        `print(${v}.head().to_string())`
+        `${v} = [{'name': r'''${name}''', 'type': type(__val).__name__, 'repr': repr(__val)[:200], 'value': __val}]`,
+        `print(repr(${v}))`
       ];
     }
   });
 
-  // File: ReadText
+  // File: ReadText（DataFrameでなくdictで返す）
   reg.node({
     id: 'python.FileReadText', title: 'ReadText', category: 'Files',
   inputType: 'None',
-  outputType: 'DataFrame',
+  outputType: 'Any',
     defaultParams: { mode:'path', path: '', inline:'' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>mode</label>
@@ -302,24 +302,24 @@ else:
         const content = (node.params?.inline||'').replace(/`/g,'');
         return [
           `_txt = _fp_render(r'''${content}''')`,
-          `${v} = pd.DataFrame({'text': [_txt]})`,
-          `print(${v}.head().to_string())`
+          `${v} = {'text': _txt }`,
+          `print(str(${v}.get('text',''))[:200])`
         ];
       }
       const path = (node.params?.path||'').replace(/`/g,'');
       return [
         `with open(_fp_render(r'''${path}'''), 'r', encoding='utf-8', errors='ignore') as _f: _txt = _f.read()`,
-        `${v} = pd.DataFrame({'text': [_txt]})`,
-        `print(${v}.head().to_string())`
+        `${v} = {'text': _txt }`,
+        `print(str(${v}.get('text',''))[:200])`
       ];
     }
   });
 
-  // File: WriteCSV (pass-through)
+  // File: WriteCSV（DataFrameのto_csvがあれば使用、なければlist-of-dictsをCSV化）
   reg.node({
     id: 'python.FileWriteCSV', title: 'WriteCSV', category: 'Files',
-  inputType: 'DataFrame',
-  outputType: 'DataFrame',
+  inputType: 'Any',
+  outputType: 'Any',
     defaultParams: { mode:'path', path: '', filename:'data.csv' },
     form(node){ const v=node.params||(node.params={}); return `
       <label>mode</label>
@@ -336,14 +336,38 @@ else:
       const src = ctx.srcVar(node); const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const mode = node.params?.mode==='download' ? 'download':'path';
       const filename = (node.params?.filename||'data.csv').replace(/`/g,'');
-      if(mode==='download'){
-        return [ `${v} = ${src}`, `print(f"[[DOWNLOAD:${node.id}:CSV]]" + ${v}.to_csv(index=False))`, `print(${v}.head().to_string())` ];
-      }
       const path = (node.params?.path||'').replace(/`/g,'');
       return [
         `${v} = ${src}`,
-        `try:\n  ${v}.to_csv(_fp_render(r'''${path}'''), index=False)\nexcept Exception as e:\n  print('WRITE_ERROR:', e)`,
-        `print(${v}.head().to_string())`
+        `import io as _io, csv as _csv` ,
+        `def _to_csv_text(obj):
+  try:
+    return obj.to_csv(index=False)
+  except Exception:
+    pass
+  try:
+    if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+      _buf = _io.StringIO()
+      _keys = []
+      for _row in obj:
+        for _k in _row.keys():
+          if _k not in _keys: _keys.append(_k)
+      _w = _csv.DictWriter(_buf, fieldnames=_keys)
+      _w.writeheader(); _w.writerows(obj)
+      return _buf.getvalue()
+  except Exception:
+    pass
+  return ''`,
+        `try:
+  _csv_text = _to_csv_text(${v})
+  if r'''${mode}''' == 'download':
+    print(f"[[DOWNLOAD:${node.id}:CSV]]" + _csv_text)
+  else:
+    with open(_fp_render(r'''${path}'''), 'w', encoding='utf-8', newline='') as _f:
+      _f.write(_csv_text)
+except Exception as _e:
+  print('WRITE_ERROR:', _e)`,
+        `try:\n  print(${v}.head().to_string())\nexcept Exception:\n  print(repr(${v})[:200])`
       ];
     }
   });
@@ -636,30 +660,67 @@ try:
       ${v} = list(${v})
 except Exception:
   pass`,
-        `# Coerce
+        `# Coerce (native-first; optionally uses pandas if available)
 try:
   _o = r'''${orient}'''
   import numpy as _np
-  if isinstance(${v}, pd.DataFrame):
+  _is_df = False
+  try:
+    import pandas as _pd
+    _is_df = isinstance(${v}, _pd.DataFrame)
+  except Exception:
+    _is_df = False
+  if _is_df:
     pass
   elif isinstance(${v}, (list, tuple, set)):
     _tmp = list(${v})
     if _tmp and isinstance(_tmp[0], dict):
-      ${v} = pd.DataFrame(_tmp)
+      try:
+        import pandas as _pd
+        ${v} = _pd.DataFrame(_tmp)
+      except Exception:
+        ${v} = _tmp  # keep list-of-dicts
     else:
-      ${v} = pd.DataFrame({'value': _tmp})
+      try:
+        import pandas as _pd
+        ${v} = _pd.DataFrame({'value': _tmp})
+      except Exception:
+        ${v} = [{'value': _x} for _x in _tmp]
   elif isinstance(${v}, dict):
-    ${v} = pd.DataFrame([${v}]) if _o!='index' else pd.DataFrame.from_dict(${v}, orient='index').T
+    try:
+      import pandas as _pd
+      ${v} = _pd.DataFrame([${v}]) if _o!='index' else _pd.DataFrame.from_dict(${v}, orient='index').T
+    except Exception:
+      ${v} = [${v}]
   elif 'numpy' in str(type(${v})) or isinstance(${v}, getattr(_np, 'ndarray', tuple)):
     try:
-      ${v} = pd.DataFrame(${v})
+      import pandas as _pd
+      ${v} = _pd.DataFrame(${v})
     except Exception:
-      ${v} = pd.DataFrame()
+      try:
+        _flat = ${v}.ravel().tolist() if hasattr(${v}, 'ravel') else list(${v})
+      except Exception:
+        _flat = []
+      ${v} = [{'value': _x} for _x in _flat]
   else:
-    ${v} = pd.DataFrame({'value':[${v}]})
+    try:
+      import pandas as _pd
+      ${v} = _pd.DataFrame({'value':[${v}]})
+    except Exception:
+      ${v} = [{'value': ${v}}]
 except Exception:
-  ${v} = pd.DataFrame()`,
-        `print(${v}.head().to_string())`
+  try:
+    import pandas as _pd
+    ${v} = _pd.DataFrame()
+  except Exception:
+    ${v} = []`,
+        `# preview-friendly print (works without pandas)
+try:
+  import pandas as _pd
+  _is_df = isinstance(${v}, _pd.DataFrame)
+except Exception:
+  _is_df = False
+print(${v}.head().to_string()) if _is_df else print(repr(${v})[:200])`
       ];
     }
   });
@@ -760,19 +821,39 @@ except Exception:
     except Exception:
       _obj = None
     if isinstance(_obj, list):
-      ${v} = pd.DataFrame(_obj) if (_mode in ('auto','records')) else pd.DataFrame({'value': _obj})
+      try:
+        import pandas as _pd
+        ${v} = _pd.DataFrame(_obj) if (_mode in ('auto','records')) else _pd.DataFrame({'value': _obj})
+      except Exception:
+        if (_mode in ('auto','records')) and (not _obj or isinstance(_obj[0], dict)):
+          ${v} = _obj
+        else:
+          ${v} = [{'value': _x} for _x in (_obj or [])]
       print('[JsonParse:auto] interpreted as records') if _mode == 'auto' else None
     elif isinstance(_obj, dict):
-      if _mode in ('auto','object'):
-        ${v} = pd.DataFrame([_obj])
-      else:
-        ${v} = pd.DataFrame.from_dict(_obj, orient='index').T
+      try:
+        import pandas as _pd
+        if _mode in ('auto','object'):
+          ${v} = _pd.DataFrame([_obj])
+        else:
+          ${v} = _pd.DataFrame.from_dict(_obj, orient='index').T
+      except Exception:
+        ${v} = [_obj]
       print('[JsonParse:auto] interpreted as object') if _mode == 'auto' else None
     else:
-      ${v} = pd.DataFrame({'value': [_obj]})
+      try:
+        import pandas as _pd
+        ${v} = _pd.DataFrame({'value': [_obj]})
+      except Exception:
+        ${v} = {'value': _obj}
 except Exception as _e:
   print('JSON_PARSE_ERROR:', _e)`,
-        `print(${v}.head().to_string()) if _is_df else print(${v}.head().to_string())`
+        `try:
+  import pandas as _pd
+  _is_df = isinstance(${v}, _pd.DataFrame)
+except Exception:
+  _is_df = False
+print(${v}.head().to_string()) if _is_df else print(repr(${v})[:200])`
       ];
     }
   });
@@ -812,7 +893,12 @@ except Exception:
       ${v}[r'''${out}'''] = ${v}[r'''${col}'''].apply(lambda _x: _json.dumps(_x, ensure_ascii=False, indent=${indent}))
     else:
       _rows = ${v}.to_dict(orient=r'''${orient}''') if hasattr(${v}, 'to_dict') else []
-      ${v}[r'''${out}'''] = pd.Series([_json.dumps(_rows, ensure_ascii=False, indent=${indent})]*len(${v}))
+      try:
+        # assign plain list without requiring pd.Series
+        _val = _json.dumps(_rows, ensure_ascii=False, indent=${indent})
+        ${v}[r'''${out}'''] = [_val] * (len(${v}) if hasattr(${v}, '__len__') else 1)
+      except Exception:
+        pass
   else:
     globals()[r'''${out}'''] = _json.dumps(${v}, ensure_ascii=False, indent=${indent})
 except Exception as _e:
@@ -896,24 +982,68 @@ except Exception as _e:
       return [
         `${v} = ${src}`,
         `try:
+  from datetime import datetime as _dt
   _kwargs = {}
   if r'''${fmt}''': _kwargs['format'] = r'''${fmt}'''
   if r'''${utc}''' == 'true': _kwargs['utc'] = True
-  if r'''${col}''':
-    _ser = pd.to_datetime(${v}[r'''${col}'''], errors=r'''${errs}''', **_kwargs)
-    if r'''${out}''':
-      ${v}[r'''${out}'''] = _ser
-    else:
-      ${v}[r'''${col}'''] = _ser
-  elif ${all ? 'True' : 'False'}:
-    for _c in list(${v}.columns):
+  def _py_parse(_x):
+    try:
+      return _dt.fromisoformat(str(_x))
+    except Exception:
       try:
-        ${v}[_c] = pd.to_datetime(${v}[_c], errors=r'''${errs}''', **_kwargs)
+        # lenient: try integer/float timestamp (seconds)
+        _f = float(_x)
+        import datetime as _d
+        return _d.datetime.fromtimestamp(_f)
+      except Exception:
+        return None
+  if r'''${col}''':
+    try:
+      import pandas as _pd
+      _ser = _pd.to_datetime(${v}[r'''${col}'''], errors=r'''${errs}''', **_kwargs)
+      if r'''${out}''':
+        ${v}[r'''${out}'''] = _ser
+      else:
+        ${v}[r'''${col}'''] = _ser
+    except Exception:
+      # fallback: apply python parser
+      if hasattr(${v}, '__getitem__') and hasattr(${v}, 'apply'):
+        try:
+          _ser = ${v}[r'''${col}'''].apply(_py_parse)
+          if r'''${out}''':
+            ${v}[r'''${out}'''] = _ser
+          else:
+            ${v}[r'''${col}'''] = _ser
+        except Exception:
+          pass
+  elif ${all ? 'True' : 'False'}:
+    try:
+      import pandas as _pd
+      for _c in list(${v}.columns):
+        try:
+          ${v}[_c] = _pd.to_datetime(${v}[_c], errors=r'''${errs}''', **_kwargs)
+        except Exception:
+          try:
+            ${v}[_c] = ${v}[_c].apply(_py_parse)
+          except Exception:
+            pass
+    except Exception:
+      try:
+        for _c in list(${v}.columns):
+          try:
+            ${v}[_c] = ${v}[_c].apply(_py_parse)
+          except Exception:
+            pass
       except Exception:
         pass
 except Exception as _e:
   print('PARSE_DATE_ERROR:', _e)`,
-        `print(${v}.head().to_string())`
+        `try:
+  import pandas as _pd
+  _is_df = isinstance(${v}, _pd.DataFrame)
+except Exception:
+  _is_df = False
+print(${v}.head().to_string()) if _is_df else print(repr(${v})[:200])`
       ];
     }
   });
@@ -1178,10 +1308,39 @@ except Exception as _e:
       _mask = ${v}.eval(_expr)
       ${v} = ${v}[_mask]
     except Exception as _e2:
-      print('FILTER_ERROR:', _e2)
+      # fallback for list-of-dicts or list values
+      try:
+        _val = ${v}
+        if isinstance(_val, list) and (not _val or isinstance(_val[0], dict)):
+          _out = []
+          for _i, _r in enumerate(_val):
+            try:
+              if bool(eval(_expr, {}, dict(_r, i=_i))):
+                _out.append(_r)
+            except Exception:
+              pass
+          ${v} = _out
+        elif isinstance(_val, list):
+          _out = []
+          for _i, _x in enumerate(_val):
+            try:
+              if bool(eval(_expr, {}, {'x': _x, 'value': _x, 'i': _i})):
+                _out.append(_x)
+            except Exception:
+              pass
+          ${v} = _out
+        else:
+          print('FILTER_ERROR:', _e2)
+      except Exception as _e3:
+        print('FILTER_ERROR:', _e3)
 except Exception as _e:
   print('FILTER_ERROR:', _e)`,
-        `print(${v}.head().to_string())`
+        `try:
+  import pandas as _pd
+  _is_df = isinstance(${v}, _pd.DataFrame)
+except Exception:
+  _is_df = False
+print(${v}.head().to_string()) if _is_df else print(repr(${v})[:200])`
       ];
     }
   });

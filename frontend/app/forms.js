@@ -10,7 +10,7 @@ function attachDnD(target) {
         target.classList.add('dnd-hover');
         e.dataTransfer.dropEffect = 'copy';
       }
-    } catch {}
+  } catch (e) {}
   };
   const over = (e) => {
     try {
@@ -19,14 +19,14 @@ function attachDnD(target) {
         target.classList.add('dnd-hover');
         e.dataTransfer.dropEffect = 'copy';
       }
-    } catch {}
+  } catch (e) {}
   };
   const leave = () => target.classList.remove('dnd-hover');
   const drop = (e) => {
-    try { e.preventDefault(); } catch {}
+  try { e.preventDefault(); } catch (e2) {}
     target.classList.remove('dnd-hover');
     let txt = '';
-    try { txt = e.dataTransfer.getData('text/plain') || ''; } catch {}
+  try { txt = e.dataTransfer.getData('text/plain') || ''; } catch (e3) {}
     if (!txt) return;
     if (target.tagName === 'SELECT') {
       const opts = Array.from(target.options || []);
@@ -114,7 +114,7 @@ export function bindForm(el, node, refreshForms) {
           }, { once: true });
           input.click();
         }
-      } catch {
+  } catch (e) {
         setInfo && setInfo('folder selection canceled');
       }
     });
@@ -168,7 +168,7 @@ export function bindForm(el, node, refreshForms) {
           }, { once: true });
           input.click();
         }
-      } catch {}
+  } catch (e) {}
     });
   }
 
@@ -199,7 +199,7 @@ export function bindForm(el, node, refreshForms) {
           pick.remove();
         }, { once: true });
         pick.click();
-      } catch {}
+  } catch (e) {}
     });
   }
 
@@ -241,7 +241,7 @@ export function bindForm(el, node, refreshForms) {
           }
           target.dispatchEvent(new Event('input', { bubbles: true }));
           target.dispatchEvent(new Event('change', { bubbles: true }));
-        } catch {
+  } catch (e) {
           // fallback: append
           target.value = (target.value || '') + token;
           target.dispatchEvent(new Event('input', { bubbles: true }));

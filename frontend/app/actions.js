@@ -18,7 +18,7 @@ export function ensureActionsArea() {
     ensureBtn('packagesBtn', 'Packages', 'secondary');
     ensureBtn('restartBtn', 'Restart Kernel', 'primary');
     ensureBtn('installBtn', 'Install / Check', 'warn');
-  } catch {}
+  } catch (e) {}
 }
 
 // Ensure a small run bar area exists, and optionally mount provided elements
@@ -33,5 +33,5 @@ export function ensureRunBar(mount) {
   else if (toolbarEl && toolbarEl.parentElement) toolbarEl.parentElement.insertBefore(rb, toolbarEl);
   else document.body.prepend(rb);
     if (mount) rb.appendChild(mount);
-  } catch {}
+  } catch (e) {}
 }

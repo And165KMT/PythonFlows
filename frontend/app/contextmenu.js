@@ -3,9 +3,9 @@ let contextMenus = [];
 
 export function closeContextMenu() {
   try {
-    for (const el of contextMenus) { try{ el.remove(); }catch{} }
+    for (const el of contextMenus) { try{ el.remove(); }catch(e){} }
     contextMenus = [];
-  } catch {}
+  } catch (e) {}
 }
 
 function renderMenu(items, x, y, parentLevel = 0, anchorBtn = null) {
@@ -28,7 +28,7 @@ function renderMenu(items, x, y, parentLevel = 0, anchorBtn = null) {
     if (hasChildren) {
       // open submenu next to the button
       // close deeper menus
-      while (contextMenus.length > parentLevel + 1) { try{ contextMenus.pop().remove(); }catch{} }
+  while (contextMenus.length > parentLevel + 1) { try{ contextMenus.pop().remove(); }catch(e){} }
       const r = btn.getBoundingClientRect();
       const subX = Math.min(window.innerWidth - 220, r.right + 6);
       const subY = Math.min(window.innerHeight - 200, r.top);
@@ -46,7 +46,7 @@ function renderMenu(items, x, y, parentLevel = 0, anchorBtn = null) {
     const key = btn.getAttribute('data-k');
     const item = (items || []).find(i => i.key === key);
     if (!item || !Array.isArray(item.children) || !item.children.length) return;
-    while (contextMenus.length > parentLevel + 1) { try{ contextMenus.pop().remove(); }catch{} }
+  while (contextMenus.length > parentLevel + 1) { try{ contextMenus.pop().remove(); }catch(e){} }
     const r = btn.getBoundingClientRect();
     const subX = Math.min(window.innerWidth - 220, r.right + 6);
     const subY = Math.min(window.innerHeight - 200, r.top);

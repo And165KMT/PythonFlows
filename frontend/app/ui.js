@@ -16,7 +16,7 @@ import { openQuickAdd as openQuickAddMod, closeQuickAdd as closeQuickAddMod } fr
 // Treat any node whose outputType is 'Figure' as a plot node (delegated)
 function isFigureNode(n){ return isFigureNodeMod(n, registry); }
 // Preview mode helper bound to the UI select element
-function getPreviewMode(){ try{ return getPreviewModeMod(previewModeEl); }catch{ return 'plots'; } }
+function getPreviewMode(){ try{ return getPreviewModeMod(previewModeEl); }catch(e){ return 'plots'; } }
 // Unify helper names used throughout this file
 const escapeHtml = (s)=> escapeHtmlUtil(s);
 const styleTableHtml = (html)=> styleTableHtmlUtil(html);
@@ -34,6 +34,8 @@ const pkgsWrap = document.getElementById('pkgsWrap');
 const tabCode = document.getElementById('tabCode');
 const tabVars = document.getElementById('tabVars');
 const tabPkgs = document.getElementById('tabPkgs');
+const rightPanel = document.getElementById('right');
+const rightResizer = document.getElementById('rightResizer');
 // Canvas / nodes / edges DOM refs (were missing)
 const canvasWrap = document.getElementById('canvasWrap');
 const nodesEl = document.getElementById('nodes');
@@ -50,10 +52,26 @@ let wsCtl = null;
 // Installed/imported packages tracking to avoid duplicate installs and keep toggles in sync
 const importedByUser = new Set();
 const installedPkgs = new Set();
+// Names of packages that are Autogen-only (no static JS entry) as advertised by the server
+const autogenOnlyNames = new Set();
+async function ensureAutogenOnlyNames(){
+  if(autogenOnlyNames.size>0) return;
+  try{
+    const res = await apiFetch('/api/packages');
+    const js = await res.json().catch(()=>[]);
+    (Array.isArray(js)? js: []).forEach(p=>{ if(p && !p.entry) autogenOnlyNames.add(String(p.name||'')); });
+  }catch(e){}
+}
+function isAutogenOnlyName(name){ try{ return autogenOnlyNames.has(String(name||'')); }catch(e){ return false; } }
+// Autogen test results per module: { ok, ng, items }
+const autogenTestResults = new Map();
+let showAutogenNgOnly = false;
+// Clipboard buffer for copy/cut/paste of subgraphs
+let clipboardGraph = null;
 
 // ——— helpers: auth token + fetch wrapper ———
-function getStoredToken(){ try{ return sessionStorage.getItem('pf_token') || null; }catch{ return null; } }
-function setStoredToken(v){ try{ if(v) sessionStorage.setItem('pf_token', v); else sessionStorage.removeItem('pf_token'); authToken = v || null; }catch{} }
+function getStoredToken(){ try{ return sessionStorage.getItem('pf_token') || null; }catch(e){ return null; } }
+function setStoredToken(v){ try{ if(v) sessionStorage.setItem('pf_token', v); else sessionStorage.removeItem('pf_token'); authToken = v || null; }catch(e){} }
 async function apiFetch(url, opts){
   const headers = Object.assign({}, (opts && opts.headers) || {});
   if(authRequired && authToken){ headers['Authorization'] = 'Bearer ' + authToken; }
@@ -231,6 +249,15 @@ function openInputModal(title, placeholder){
 }
 
 async function pipInstallAndImport(name, version){
+  // Guard: stdlib or autogen-only should not be pip installed
+  try{ await ensureAutogenOnlyNames(); }catch(e){}
+  if(isAutogenOnlyName(name)){
+    appendLog(`[pip] skip stdlib/autogen-only: ${name} → introspect only`);
+    await introspectAndRegister(name);
+    try{ importedByUser.add(name); }catch(e){}
+  try{ installedPkgs.add(name); }catch(e){}
+    return true;
+  }
   try{
     appendLog(`[pip] installing ${name}${version? '=='+version: ''}...`);
     statusEl.textContent='installing...';
@@ -241,7 +268,7 @@ async function pipInstallAndImport(name, version){
       await introspectAndRegister(name);
       statusEl.textContent='idle';
   // mark toggle as done if present
-  try{ const el = pkgsWrap && pkgsWrap.querySelector(`.pkg-toggle[data-name="${CSS.escape(name)}"] input[type="checkbox"]`); if(el){ el.checked=true; el.disabled=true; } }catch{}
+  try{ const el = pkgsWrap && pkgsWrap.querySelector(`.pkg-toggle[data-name="${CSS.escape(name)}"] input[type="checkbox"]`); if(el){ el.checked=true; el.disabled=true; } }catch(e){}
       return true;
     } else {
   appendLog('[pip] failed ' + JSON.stringify(js));
@@ -258,102 +285,67 @@ async function introspectAndRegister(mod){
     const arr = Array.isArray(js.nodes) ? js.nodes : [];
     if(!arr.length){ appendLog('[import] no callables found in ' + mod); return; }
     for(const spec of arr){
-      const id = spec.id || ('autogen.' + Math.random().toString(36).slice(2,8));
-      if(registry.nodes.has(id)) continue;
-      const def = {
-        id,
-        title: spec.title || id,
-        category: spec.category || 'Auto',
-        inputType: spec.inputType || 'Any',
-        outputType: spec.outputType || 'Any',
-  origin: 'autogen',
-        defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
-        form(node){
-          const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
-          const fields = (spec.params||[]).filter(p=> !p.hidden);
-          function shown(p){ if(!p.when) return true; const m=String(p.when).split('='); if(m.length!==2) return true; const [k,val]=m; return String(v[k]||'')===String(val); }
-          function inputFor(p){
-            const name=p.name; const label=p.label||name; const val=v[name] ?? p.default ?? ''; const ui=p.ui||'string';
-            const head = `<div class=\"pf-label\"><span class=\"param-port\" data-param=\"${name}\" title=\"Connect input to ${name}\"></span><span>${label}</span></div>`;
-            const field = (ui==='select' && Array.isArray(p.enum))
-              ? `<select name=\"${name}\">${p.enum.map(x=>`<option value=\"${x}\" ${String(val)===String(x)?'selected':''}>${x}</option>`).join('')}</select>`
-              : (ui==='textarea' ? `<textarea name=\"${name}\">${val||''}</textarea>` : `<input name=\"${name}\" value=\"${val||''}\">`);
-            return `<div class=\"pf-field ${v['__bound__'+name]?'bound':''}\" data-param=\"${name}\">${head}${field}</div>`;
-          }
-          const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
-          const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
-          return `${basic}${adv? `<details style=\"margin-top:8px\"><summary style=\"cursor:pointer; user-select:none\">Advanced</summary>${adv}</details>`:''}`;
-        },
-        code(node, ctx){
-          const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
-          const p = node.params||{};
-          const call = spec.call || {};
-          const params = (spec.params||[])
-            .filter(x=> !x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||''))
-            .filter(x=> (p['__bound__'+x.name]!=null) || (p[x.name]!==undefined))
-            .map(x=> {
-               const b = p['__bound__'+x.name];
-               if(b!=null) return `${x.name}=${b}`;
-               return `${x.name}=${JSON.stringify(p[x.name])}`;
-            })
-            .join(', ');
-          const target = call.target || '';
-          const parts = target.split('.');
-          const root = parts[0] || '';
-          const modPath = parts.slice(0, -1).join('.');
-          const seg = [];
-          if(root){ seg.push(`import ${root}`); seg.push(`_fp_register_import('${root}')`); }
-          if(modPath && modPath.includes('.')){ seg.push(`import importlib; importlib.import_module(r'''${modPath}''')`); }
-          const srcs = (ctx && typeof ctx.srcVars==='function') ? ctx.srcVars(node) : [];
-          const src = srcs[0] || null;
-          const dfParam = call.dfParam || null;
-          if(call.kind==='function'){
-            if(dfParam && src){
-              const argz = [];
-              argz.push(`${dfParam}=${src}`);
-              if(params) argz.push(params);
-              seg.push(`${v} = ${target}(${argz.join(', ')})`);
-            } else {
-              seg.push(`${v} = ${target}(${params})`);
-            }
-          } else if(call.kind==='constructor'){
-            seg.push(`${v} = ${target}(${params})`);
-          } else if(call.kind==='method'){
-            let recv = srcs[0] || src;
-            const dataVar = srcs.length>=2 ? srcs[srcs.length-1] : (srcs[0] || null);
-            if(!recv && call.receiver && call.receiver!=='estimator'){
-              recv = `globals().get('${call.receiver}', None)`;
-            }
-            const meth = target.split('.').slice(-1)[0];
-            if(recv){
-              const argz = [];
-              if(dfParam && dfParam!=='self' && dataVar) argz.push(`${dfParam}=${dataVar}`);
-              if(params) argz.push(params);
-              const joined = argz.join(', ');
-              if(dfParam==='self') seg.push(`${v} = ${recv}.${meth}(${params})`);
-              else seg.push(`${v} = ${recv}.${meth}(${joined})`);
-              if(call.returnsSelf) seg.push(`${v} = ${recv}`);
-            } else {
-              seg.push(`${v} = ${target}(${params})`);
-            }
-          } else {
-            seg.push(`${v} = ${target}(${params})`);
-          }
-          seg.push(`print(${v})`);
-          return seg;
-        }
-      };
-  registry.nodes.set(id, def);
+      const def = makeAutogenDef(spec);
+      const id = def.id;
+      if(!id) continue;
+      // upsert
+      registry.nodes.set(id, def);
       const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
-  if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
-  if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
-  const arr = registry.byPackage.get(pkgName);
-  if(!arr.includes(id)) arr.push(id);
+      if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+      if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+      const plist = registry.byPackage.get(pkgName);
+      if(!plist.includes(id)) plist.push(id);
     }
     renderToolbar();
-    try{ renderPackagesList(); }catch{}
+  try{ renderPackagesList(); }catch(e){}
     appendLog('[import] added ' + arr.length + ' node(s) from ' + mod);
+    // Quality check newly generated nodes
+    try{
+      const testRes = await apiFetch('/api/autogen/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ module: mod, maxTests: 8 }) });
+      const testJs = await testRes.json().catch(()=>({items:[]}));
+      const items = Array.isArray(testJs.items)? testJs.items: [];
+      const ok = items.filter(x=> x && x.ok).length; const ng = items.length - ok;
+      appendLog(`[autogen:test] ${ok} OK / ${ng} NG for ${mod}`);
+      items.forEach(it=>{ if(!it.ok) appendLog(`[autogen:test:NG] ${it.id}: ${it.error||'error'}`); });
+  try{ autogenTestResults.set(mod, { ok, ng, items }); renderPackagesList(); }catch(e){}
+  }catch(e){}
   }catch(e){ appendLog('[import] failed'); }
+}
+
+// Introspect a dotted target (e.g., pandas.DataFrame.merge) and register nodes
+async function introspectTarget(target){
+  try{
+    const res = await apiFetch('/api/introspect?target=' + encodeURIComponent(target));
+    const js = await res.json().catch(()=>({}));
+    const arr = Array.isArray(js.nodes) ? js.nodes : [];
+    if(!arr.length){ appendLog('[autogen] no nodes for ' + target); return; }
+    for(const spec of arr){
+      const def = makeAutogenDef(spec);
+      const id = def.id; if(!id) continue;
+      registry.nodes.set(id, def);
+      const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+      if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+      if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+      const arrList = registry.byPackage.get(pkgName);
+      if(!arrList.includes(id)) arrList.push(id);
+    }
+    renderToolbar();
+  try{ renderPackagesList(); }catch(e){}
+    appendLog('[autogen] added ' + arr.length + ' node(s) from ' + target);
+    // Quality check for dotted target's root module
+    try{
+      const root = String(target||'').split('.')[0] || '';
+      if(root){
+        const testRes = await apiFetch('/api/autogen/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ module: root, maxTests: 6 }) });
+        const testJs = await testRes.json().catch(()=>({items:[]}));
+        const items = Array.isArray(testJs.items)? testJs.items: [];
+        const ok = items.filter(x=> x && x.ok).length; const ng = items.length - ok;
+        appendLog(`[autogen:test] ${ok} OK / ${ng} NG for ${root}`);
+        items.forEach(it=>{ if(!it.ok) appendLog(`[autogen:test:NG] ${it.id}: ${it.error||'error'}`); });
+  try{ autogenTestResults.set(root, { ok, ng, items }); renderPackagesList(); }catch(e){}
+      }
+  }catch(e){}
+  }catch(e){ appendLog('[autogen] failed for ' + target); }
 }
 // Basic preview dock placeholder (used by WS adapter)
 function updatePreviewDock(){}
@@ -365,7 +357,7 @@ function getTy(){ return state.view?.ty || 0; }
 function screenToWorldPoint(clientX, clientY){ const rect = canvasWrap.getBoundingClientRect(); const x = clientX - rect.left; const y = clientY - rect.top; const s = getScale(); return { x: (x - getTx())/s, y: (y - getTy())/s }; }
 function applyViewTransform(){ const s=getScale(), tx=getTx(), ty=getTy(); nodesEl.style.transformOrigin='0 0'; nodesEl.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`; }
 // Ensure form state is synced before codegen (inputs are already bound by forms.js; keep as lightweight guard)
-function syncFormsToState(){ try{ /* forms are live-bound; nothing extra needed */ }catch{} }
+function syncFormsToState(){ try{ /* forms are live-bound; nothing extra needed */ }catch(e){} }
 function ensureWS(){
   if(!wsCtl){
     const buildUrl = ()=>{ const proto=(location.protocol==='https:'?'wss://':'ws://'); const tokenQs = (authRequired && authToken) ? ('?token='+encodeURIComponent(authToken)) : ''; return proto + location.host + '/ws' + tokenQs; };
@@ -400,19 +392,20 @@ try{
       ensureWS(); clearLog(); statusEl.textContent='running...';
       syncFormsToState();
       let code = genCode(); code = sanitizePython(code); genCodeEl.textContent = code;
+  try{ if(wsCtl && wsCtl.setPendingVarsRefresh) wsCtl.setPendingVarsRefresh(true); }catch(e){}
       const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
-      let js={}; try{ js=await res.json(); }catch{}
+  let js={}; try{ js=await res.json(); }catch(e){}
       appendLog('Sent exec: ' + JSON.stringify(js));
     }, globalRunBtn, 'Running...');
   });
-}catch{}
+}catch(e){}
 // Run state helpers
 function updateRunButtonsState(){
   try{
     const disabled = !!runningLock || !!kernelDisabled;
     document.querySelectorAll('.node .node-run').forEach(b=>{ b.disabled = disabled; });
     if(globalRunBtn) globalRunBtn.disabled = disabled;
-  }catch{}
+  }catch(e){}
 }
 async function runWithBusy(fn, btn, busyText='Working...'){
   const old = btn && btn.textContent;
@@ -439,7 +432,8 @@ async function renderPackagesList(){
   if(!pkgsWrap) return;
   try{
     // Left column: declared/installed packages with toggle to import (deduped)
-    await loadPackages();
+  await loadPackages();
+  await ensureAutogenOnlyNames();
     const declared = Array.isArray(registry.packages) ? registry.packages : [];
     const names = declared.map(p=> p.name);
     const versions = new Map();
@@ -448,17 +442,30 @@ async function renderPackagesList(){
       try{
         const js = await (await apiFetch('/api/modules/versions?names=' + encodeURIComponent(names.join(',')))).json();
         (js.items||[]).forEach(x=> { versions.set(x.name, x.version||''); if(x.version) installedPkgs.add(x.name); });
-      }catch{}
+  }catch(e){}
     }
-    const togglesHtml = declared.map(p=>{
-      const ver = versions.get(p.name) || '';
+    const togglesHtml = declared
+      .filter(p=>{
+        if(!showAutogenNgOnly) return true;
+        const r = autogenTestResults.get(p.name);
+        return r && r.ng > 0;
+      })
+      .map(p=>{
+  const ver = versions.get(p.name) || '';
       const nodeCount = (registry.byPackage.get(p.name)||[]).length;
+      const test = autogenTestResults.get(p.name);
+      const ngBadge = test && test.ng>0 ? `<span class="badge badge-ng" title="Autogen test NG">NG:${test.ng}</span>` : '';
+      const okBadge = test && test.ok>0 ? `<span class="badge badge-ok" title="Autogen test OK">OK:${test.ok}</span>` : '';
+  const autoBadge = isAutogenOnlyName(p.name) ? `<span class="badge" title="Autogen only (stdlib or no UI)">Autogen</span>` : '';
       // 初期状態は常にOFF（未インポート）。ただしこのセッションでユーザーがONにしたものはON+disabledで表示。
       const isUserImported = importedByUser.has(p.name);
       const alreadyInstalled = installedPkgs.has(p.name);
       return `<div class="pkg-toggle" data-name="${escapeHtmlUtil(p.name)}">
         <div>
-          <div>${escapeHtmlUtil(p.label||p.name)}</div>
+          <div style="display:flex; gap:6px; align-items:center;">
+    <div>${escapeHtmlUtil(p.label||p.name)}</div>
+    ${autoBadge} ${ngBadge} ${okBadge}
+          </div>
           <div class="meta">${escapeHtmlUtil(ver||'-')} • ${nodeCount} nodes</div>
         </div>
         <label class="switch"><input type="checkbox" ${isUserImported? 'checked disabled': ''} ${alreadyInstalled && !isUserImported? '': ''}><span class="slider"></span></label>
@@ -468,8 +475,22 @@ async function renderPackagesList(){
     // Right column: PyPI results, draggable to left to install
     const rightHtml = `<div style="display:flex; gap:8px; margin-bottom:8px"><input id="pypi_q2" class="input" placeholder="Search PyPI" style="flex:1"><button id="pypi_go2" class="secondary">Search</button></div><div id="pypi_list2" class="pkg-list"></div>`;
     pkgsWrap.innerHTML = `
-      <div class="pkg-col" id="colLeft"><h3>インポート可能（重複防止）</h3><div id="left_list" class="pkg-list">${togglesHtml || '<div style="color:#9ba3af; padding:6px">（なし）</div>'}</div></div>
+      <div class="pkg-col" id="colLeft">
+        <h3 style="display:flex; align-items:center; gap:8px;">
+          インポート可能（重複防止）
+          <label style="display:flex; align-items:center; gap:6px; font-weight:normal; font-size:12px;">
+            <input id="pf_autogen_ng_only" type="checkbox" ${showAutogenNgOnly? 'checked':''}>
+            <span>Autogen NGのみ</span>
+          </label>
+        </h3>
+        <div id="left_list" class="pkg-list">${togglesHtml || '<div style="color:#9ba3af; padding:6px">（なし）</div>'}</div>
+      </div>
       <div class="pkg-col" id="colRight"><h3>PyPI 検索結果（ドラッグで左にPIP + インポート）</h3>${rightHtml}</div>`;
+    // Filter toggle wiring
+    const ngOnly = document.getElementById('pf_autogen_ng_only');
+    if(ngOnly){
+      ngOnly.addEventListener('change', ()=>{ showAutogenNgOnly = !!ngOnly.checked; renderPackagesList(); });
+    }
 
     // Wire toggles: on check = introspectAndRegister if not already
     pkgsWrap.querySelectorAll('.pkg-toggle input[type="checkbox"]').forEach(chk=>{
@@ -479,7 +500,7 @@ async function renderPackagesList(){
         if(chk.checked){
           chk.disabled = true;
           const ok = await importPackageFlow(name);
-          if(ok){ try{ importedByUser.add(name); }catch{} }
+          if(ok){ try{ importedByUser.add(name); }catch(e){} }
           await renderPackagesList();
           renderToolbar();
         }
@@ -489,7 +510,7 @@ async function renderPackagesList(){
     // Right: search and render results
     async function loadPyPIList(q){
       const listEl = document.getElementById('pypi_list2'); listEl.innerHTML = '<div style="color:#9ba3af; padding:6px">Loading…</div>';
-      try{
+  try{
         const js = await (await apiFetch('/api/pypi/search?q=' + encodeURIComponent(q||'') + '&limit=50')).json();
         if((!js.items || js.items.length===0) && js.error){
           listEl.innerHTML = `<div style="color:#fca5a5; padding:6px">検索に失敗しました（${String(js.error)}）。右上メニューの「Install from PyPI」で名前指定インストールも可能です。</div>`;
@@ -505,7 +526,7 @@ async function renderPackagesList(){
         listEl.innerHTML = rows || '<div style="color:#9ba3af; padding:6px">No results</div>';
         // draggable
         listEl.querySelectorAll('.pkg-item').forEach(el=>{
-          el.addEventListener('dragstart', (e)=>{ const name = el.getAttribute('data-name')||''; try{ e.dataTransfer.setData('text/plain', name); }catch{} e.dataTransfer.effectAllowed='copy'; el.classList.add('dragging'); });
+          el.addEventListener('dragstart', (e)=>{ const name = el.getAttribute('data-name')||''; try{ e.dataTransfer.setData('text/plain', name); }catch(e2){} e.dataTransfer.effectAllowed='copy'; el.classList.add('dragging'); });
           el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
         });
         // clickable install
@@ -513,12 +534,13 @@ async function renderPackagesList(){
           btn.addEventListener('click', async (e)=>{
             const root = e.target.closest('.pkg-item'); const name = root && root.getAttribute('data-name'); if(!name) return;
             if(installedPkgs.has(name)) return; // guard
-            const ok = await pipInstallAndImport(name, '');
-            if(ok){ try{ importedByUser.add(name); installedPkgs.add(name); }catch{} }
+            await ensureAutogenOnlyNames();
+            const ok = isAutogenOnlyName(name) ? (await introspectAndRegister(name), true) : await pipInstallAndImport(name, '');
+            if(ok){ try{ importedByUser.add(name); installedPkgs.add(name); }catch(e2){} }
             await renderPackagesList(); renderToolbar();
           });
         });
-      }catch{
+  }catch(e){
         document.getElementById('pypi_list2').innerHTML = '<div style="color:#fca5a5; padding:6px">検索に失敗しました</div>';
       }
     }
@@ -538,42 +560,66 @@ async function renderPackagesList(){
       ev.preventDefault(); leftCol.classList.remove('dragover');
       const name = ev.dataTransfer.getData('text/plain'); if(!name) return;
       // install then introspect
-      await pipInstallAndImport(name, ''); await renderPackagesList(); renderToolbar();
+      await ensureAutogenOnlyNames();
+      if(isAutogenOnlyName(name)){
+        await introspectAndRegister(name);
+      } else {
+        await pipInstallAndImport(name, '');
+      }
+      await renderPackagesList(); renderToolbar();
     });
-  }catch{ pkgsWrap.innerHTML = '<div style="color:#9ba3af">一覧の描画に失敗しました</div>'; }
+  }catch(e){ pkgsWrap.innerHTML = '<div style="color:#9ba3af">一覧の描画に失敗しました</div>'; }
 }
 
 // Robust import flow: try import; if fails, pip install; then introspect/register
 async function importPackageFlow(name){
   try{
-  // Check already introspected
-  if(registry.byPackage && registry.byPackage.get(name) && registry.byPackage.get(name).length){
+    await ensureAutogenOnlyNames();
+    // Already registered?
+    if(registry.byPackage && registry.byPackage.get(name) && registry.byPackage.get(name).length){
       appendLog(`[import] ${name} already registered`);
       return true;
     }
-    // Ask backend to introspect; backend kernel will import the module
-    let ok = false;
-          if(!arr.length){ appendLog('[import] no callables found in ' + mod); return; }
-          let added = 0;
-          for(const spec of arr){
-            const def = makeAutogenDef(spec);
-            const id = def.id;
-            if(registry.nodes.has(id)) continue;
-            registry.nodes.set(id, def);
-            const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
-            if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
-            if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
-            const arrList = registry.byPackage.get(pkgName);
-            if(!arrList.includes(id)) arrList.push(id);
-            added++;
-          }
-          renderToolbar();
-          try{ renderPackagesList(); }catch{}
-          appendLog('[import] added ' + added + ' node(s) from ' + mod);
+    // Try introspect first (module must be installed)
+    let res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(name));
+    let js = await res.json().catch(()=>({}));
+    let arr = Array.isArray(js.nodes) ? js.nodes : [];
+    if(!arr.length){
+      // fallback: attempt pip install then introspect (unless autogen-only/stdlib)
+      if(isAutogenOnlyName(name)){
+        appendLog(`[import] ${name} is autogen-only; skipping pip and trying introspect again`);
+        await introspectAndRegister(name);
+        return true;
+      }
+      const installed = await pipInstallAndImport(name, '');
+      if(!installed) return false;
+      res = await apiFetch('/api/introspect_module?module=' + encodeURIComponent(name));
+      js = await res.json().catch(()=>({}));
+      arr = Array.isArray(js.nodes) ? js.nodes : [];
+    }
+    if(!arr.length){ appendLog('[import] no callables found in ' + name); return false; }
+    let added = 0;
+    for(const spec of arr){
+      const def = makeAutogenDef(spec);
+      const id = def.id;
+      if(!id) continue;
+      if(!registry.nodes.has(id)) added++;
+      registry.nodes.set(id, def);
+      const pkgName = spec.pkg || (spec.call?.target?.split('.')?.[0] || 'autogen');
+      if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: pkgName.charAt(0).toUpperCase()+pkgName.slice(1), entry:'' });
+      if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+      const arrList = registry.byPackage.get(pkgName);
+      if(!arrList.includes(id)) arrList.push(id);
+    }
+    renderToolbar();
+  try{ renderPackagesList(); }catch(e){}
+    appendLog('[import] added ' + added + ' node(s) from ' + name);
+    return true;
+  }catch(e){ appendLog('[import] failed'); return false; }
 }
 
 // Variables
-function filterVars(arr){ try{ return (arr||[]).filter(v=>{ const t = String(v.type||'').toLowerCase(); const n = String(v.name||'').toLowerCase(); if(n==='exit' || n==='quit') return false; if(n==='in' || n==='out') return false; if(n.startsWith('_')) return false; if(t.includes('module')) return false; if(t.includes('function')) return false; if(t.includes('method')) return false; if(t.includes('autocall')) return false; if(t.includes('zmqexitautocall')) return false; return true; }); }catch{ return arr||[]; } }
+function filterVars(arr){ try{ return (arr||[]).filter(v=>{ const t = String(v.type||'').toLowerCase(); const n = String(v.name||'').toLowerCase(); if(n==='exit' || n==='quit') return false; if(n==='in' || n==='out') return false; if(n.startsWith('_')) return false; if(t.includes('module')) return false; if(t.includes('function')) return false; if(t.includes('method')) return false; if(t.includes('autocall')) return false; if(t.includes('zmqexitautocall')) return false; return true; }); }catch(e){ return arr||[]; } }
 async function refreshVariables(){
   if(!rightVars || rightVars.style.display==='none') return;
   try{
@@ -595,12 +641,12 @@ async function refreshVariables(){
         return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell"><div style="max-width:100%; overflow:auto">${styleTableHtml(v.html)}</div>${dims}${actions}${menuBtn}</div></td></tr>`;
       }
       if(tLower==='ndarray'){
-        installBtn.onclick = ()=> close({ custom:true });
         const val = (v.repr!=null? String(v.repr): '');
+        const shp = Array.isArray(v.shape) ? v.shape.join('×') : (v.shape!=null? String(v.shape): '');
         const csvBtn = `<button class="btn btn-ghost var-csv" data-var="${name}" title="Download CSV"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m0 0l-3.5-3.5M12 13l3.5-3.5M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Export CSV</button>`;
         const menuBtn = `<button class="btn btn-icon var-menu var-float-menu" data-var="${name}" data-type="${type}" title="Actions">⋯</button>`;
         const actions = `<div class="var-actions">${csvBtn}</div>`;
-        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell">${escapeHtml(val).slice(0,200)} <span style="color:var(--sub); font-size:11px;">${shp}</span>${actions}${menuBtn}</div></td></tr>`;
+        return `<tr data-var="${name}" data-type="${type}"><td>${nameCell}</td><td>${type}</td><td><div class="var-cell">${escapeHtml(val).slice(0,200)} <span style=\"color:var(--sub); font-size:11px;\">${shp}</span>${actions}${menuBtn}</div></td></tr>`;
       }
       const val = (v.repr!=null? String(v.repr): (v.value!=null? String(v.value): ''));
       const menuBtn = `<button class="btn btn-icon var-menu var-float-menu" data-var="${name}" data-type="${type}" title="Actions">⋯</button>`;
@@ -617,12 +663,12 @@ async function refreshVariables(){
         const importsBox = await renderImportsList();
         parent.appendChild(importsBox);
       }
-    }catch{}
+  }catch(e){}
     // Make variables draggable
     varsWrap.querySelectorAll('.var-item').forEach(el=>{
       el.addEventListener('dragstart', (e)=>{
         const name = el.getAttribute('data-var') || el.textContent || '';
-        try{ e.dataTransfer.setData('text/plain', name); }catch{}
+  try{ e.dataTransfer.setData('text/plain', name); }catch(e2){}
         e.dataTransfer.effectAllowed = 'copy';
         el.classList.add('dragging');
       });
@@ -661,7 +707,7 @@ async function refreshVariables(){
         });
       }
     });
-  }catch{
+  }catch(e){
     varsWrap.innerHTML = '<div style="color:#9ba3af">変数の取得に失敗しました</div>';
   }
 }
@@ -707,7 +753,7 @@ async function openVarActionsMenu(name, type, x, y){
         add('XML Preview…', async ()=>{ const xp = window.prompt('xpath (e.g., .//item)', './/'); const url = `/api/variables/${encodeURIComponent(name)}/xml/preview${xp? ('?xpath='+encodeURIComponent(xp)) : ''}`; const r = await (await apiFetch(url)).json().catch(()=>({})); if(r && r.columns && r.data){ openGridModal(`${name} • xml preview`, r.columns, r.data); } else openMessageModal('xml preview', JSON.stringify(r)); });
         add('XML Tags…', async ()=>{ const r = await (await apiFetch(`/api/variables/${encodeURIComponent(name)}/xml/tags`)).json().catch(()=>({})); if(r && r.tags){ openGridModal(`${name} • xml tags`, ['tag','count'], r.tags); } else openMessageModal('xml tags', JSON.stringify(r)); });
       }
-    }catch{}
+  }catch(e){}
     // open after async population
     openContextMenu(items, x, y);
   };
@@ -792,7 +838,14 @@ function createNodeEl(node){
   </div>
   <div class=\"actions\">
     <button class=\"node-run btn-primary\">Run</button>
-    <button class=\"node-del btn-icon danger\" title=\"Delete\" aria-label=\"Delete\">${'<svg viewBox=\\"0 0 24 24\\" fill=\\"none\\" stroke=\\"currentColor\\" stroke-width=\\"2\\" stroke-linecap=\\"round\\" stroke-linejoin=\\"round\\"><polyline points=\\"3 6 5 6 21 6\\"></polyline><path d=\\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\\"></path><line x1=\\"10\\" y1=\\"11\\" x2=\\"10\\" y2=\\"17\\"></line><line x1=\\"14\\" y1=\\"11\\" x2=\\"14\\" y2=\\"17\\"></line></svg>'}</button>
+    <button class=\"node-del btn-icon danger\" title=\"Delete\" aria-label=\"Delete\">
+      <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+        <polyline points=\"3 6 5 6 21 6\"></polyline>
+        <path d=\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\"></path>
+        <line x1=\"10\" y1=\"11\" x2=\"10\" y2=\"17\"></line>
+        <line x1=\"14\" y1=\"11\" x2=\"14\" y2=\"17\"></line>
+      </svg>
+    </button>
   </div>
   <div class=\"node-resize-h\" title=\"Drag to resize width\"></div>`;
   el.querySelector('.node-del').addEventListener('click', ()=>{ deleteNodeById(node.id); render(); saveToLocal(); });
@@ -804,8 +857,9 @@ function createNodeEl(node){
           ensureWS(); statusEl.textContent='running...';
           syncFormsToState();
           let code = genCodeUpTo(node.id); code = sanitizePython(code); genCodeEl.textContent = code;
+          try{ if(wsCtl && wsCtl.setPendingVarsRefresh) wsCtl.setPendingVarsRefresh(true); }catch(e){}
           const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
-          let js={}; try{ js=await res.json(); }catch{}
+          let js={}; try{ js=await res.json(); }catch(e){}
           appendLog('Sent exec (node '+node.id+'): ' + JSON.stringify(js));
         }, runBtn, 'Running...');
       });
@@ -829,8 +883,8 @@ function createNodeEl(node){
   const inPort = el.querySelector('.port.in');
   function clearPendingConnectionUI(){
     state.pendingSrc = null;
-    try{ clearGhost(); }catch{}
-    try{ closeQuickAdd(); }catch{}
+  try{ clearGhost(); }catch(e){}
+  try{ closeQuickAdd(); }catch(e){}
     document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
   }
   if(outPort){
@@ -883,15 +937,48 @@ function createNodeEl(node){
         const field = el.querySelector(`.pf-field[data-param="${param}"]`);
         if(field){ field.classList.add('bound'); field.setAttribute('data-bound', varName||''); }
         clearPendingConnectionUI(); render(); saveToLocal();
-      }catch{}
+  }catch(e){}
     });
   });
+  // Drag and drop from Variables panel: bind variable to parameter
+  try{
+    const bodyEl = el.querySelector('.body');
+    if(bodyEl){
+      bodyEl.addEventListener('dragover', (ev)=>{
+        const src = ev.dataTransfer && ev.dataTransfer.types && ev.dataTransfer.types.includes('text/plain');
+        if(!src) return;
+        const fromVars = ev.dataTransfer.getData('text/plain');
+        if(!fromVars) return;
+        ev.preventDefault();
+        bodyEl.classList.add('dragover');
+      });
+      bodyEl.addEventListener('dragleave', ()=> bodyEl.classList.remove('dragover'));
+      bodyEl.addEventListener('drop', (ev)=>{
+        ev.preventDefault(); bodyEl.classList.remove('dragover');
+        const name = ev.dataTransfer.getData('text/plain'); if(!name) return;
+        // Find the nearest pf-field under pointer
+        const tgt = ev.target.closest('.pf-field');
+        if(!tgt) return;
+        const param = tgt.getAttribute('data-param'); if(!param) return;
+        try{
+          const def = registry.nodes.get(node.type);
+          const v = node.params || (node.params = def?.defaultParams ? JSON.parse(JSON.stringify(def.defaultParams)) : {});
+          // name could be a variable name; we bind to upstream node variable if available; otherwise treat as Python identifier
+          const pyVar = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : JSON.stringify(name);
+          v['__bound__'+param] = pyVar;
+          tgt.classList.add('bound');
+          tgt.setAttribute('data-bound', String(pyVar));
+          render(); saveToLocal();
+  }catch(e){}
+      });
+    }
+  }catch(e){}
   return el; }
 
 function renderToolbar(){
   toolbarEl.innerHTML = '';
   // パッケージ順序: AUTOGENノードを含むパッケージを優先
-  const pkgs = (registry.packages || []).slice();
+  let pkgs = (registry.packages || []).slice();
   pkgs.sort((a,b)=>{
     const typesA = (registry.byPackage.get(a.name)||[]);
     const typesB = (registry.byPackage.get(b.name)||[]);
@@ -900,6 +987,16 @@ function renderToolbar(){
     if(autA!==autB) return autB - autA; // autogen含む=先頭
     return a.name.localeCompare(b.name);
   });
+  // 未インポート（ノード未登録）のパッケージは左ペインに出さない
+  pkgs = pkgs.filter(p=> (registry.byPackage.get(p.name)||[]).length > 0);
+  if(pkgs.length===0){
+    const empty = document.createElement('div');
+    empty.style.color = '#9ba3af';
+    empty.style.padding = '8px 10px';
+    empty.textContent = 'パッケージはまだありません。右上のPackagesから追加してください。';
+    toolbarEl.appendChild(empty);
+    return;
+  }
   if(!state.activePkg && pkgs[0]) state.activePkg = pkgs[0].name;
   pkgs.forEach(p=>{
     const details = document.createElement('details');
@@ -985,7 +1082,8 @@ function renderSubsystems(){
         ensureWS(); statusEl.textContent='running...';
   syncFormsToState();
   let code = genCodeForNodes(g.nodeIds, true); code = sanitizePython(code); genCodeEl.textContent = code;
-  const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{}
+  try{ if(wsCtl && wsCtl.setPendingVarsRefresh) wsCtl.setPendingVarsRefresh(true); }catch(e){}
+  const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch(e){}
   appendLog('Sent exec (group): ' + JSON.stringify(js));
       }, btn, 'Running...');
     });
@@ -1047,10 +1145,10 @@ function renderGroups(){ ensureGroupsLayer(); if(!Array.isArray(state.groups)) r
     actions.querySelector('.toggle').addEventListener('click', (e)=>{ e.stopPropagation(); g.collapsed = !g.collapsed; render(); saveToLocal(); });
     actions.querySelector('.run').addEventListener('click', async (e)=>{
       e.stopPropagation(); await runWithBusy(async ()=>{
-  ensureWS(); statusEl.textContent='running...'; syncFormsToState(); let code = genCodeForNodes(g.nodeIds, true); code = sanitizePython(code); genCodeEl.textContent = code; const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch{} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
+  ensureWS(); statusEl.textContent='running...'; syncFormsToState(); let code = genCodeForNodes(g.nodeIds, true); code = sanitizePython(code); genCodeEl.textContent = code; try{ if(wsCtl && wsCtl.setPendingVarsRefresh) wsCtl.setPendingVarsRefresh(true); }catch(e){} const res = await apiFetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) }); let js={}; try{ js=await res.json(); }catch(e){} appendLog('Sent exec (group-frame): ' + JSON.stringify(js));
       }, actions.querySelector('.run'));
     });
-    actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch{} });
+  actions.querySelector('.copy').addEventListener('click', (e)=>{ e.stopPropagation(); try{ const data = makeSubgraph(g.nodeIds); const wpt = screenToWorldPoint(left+width+20, top+height/2); const newIds = pasteSubgraph(data, { x: (wpt.x||0), y: (wpt.y||0) }); if(newIds && newIds.length){ createGroup((g.name||'Subsystem')+' Copy', newIds); } render(); saveToLocal(); }catch(e){} });
     actions.querySelector('.del').addEventListener('click', (e)=>{ e.stopPropagation(); state.groups = state.groups.filter(x=> x!==g); render(); });
     groupsLayer.appendChild(frame);
 
@@ -1094,8 +1192,9 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
     }
   
 
-  // Buttons
-  document.getElementById('sampleBtn').addEventListener('click', ()=>{
+  // Buttons (optional in this layout)
+  const sampleBtnEl = document.getElementById('sampleBtn');
+  if(sampleBtnEl) sampleBtnEl.addEventListener('click', ()=>{
     state.nodes=[]; state.edges=[]; state.nextId=1; state.groups=[];
     const n1 = addNode('pandas.ReadCSV', 60, 60);
     const n2 = addNode('pandas.FilterRows', 340, 80);
@@ -1105,7 +1204,8 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
     render();
   });
 
-  document.getElementById('installBtn').addEventListener('click', async ()=>{
+  const installBtnEl = document.getElementById('installBtn');
+  if(installBtnEl) installBtnEl.addEventListener('click', async ()=>{
     statusEl.textContent='installing...';
     appendLog('Installing requirements...');
     const res = await apiFetch('/bootstrap', { method:'POST' });
@@ -1114,7 +1214,8 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
     statusEl.textContent='idle';
   });
 
-  document.getElementById('restartBtn').addEventListener('click', async ()=>{
+  const restartBtnEl = document.getElementById('restartBtn');
+  if(restartBtnEl) restartBtnEl.addEventListener('click', async ()=>{
     if(kernelDisabled){ appendLog('[kernel] feature disabled'); return; }
     appendLog('[kernel] restarting...');
     statusEl.textContent='restarting...';
@@ -1126,7 +1227,7 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
       appendLog('[kernel] restart error');
     }
     statusEl.textContent='idle';
-  try{ const _ws = wsCtl && wsCtl.getWS ? wsCtl.getWS() : null; if(_ws) _ws.close(); }catch{}
+  try{ const _ws = wsCtl && wsCtl.getWS ? wsCtl.getWS() : null; if(_ws) _ws.close(); }catch(e){}
     ensureWS();
   });
 
@@ -1148,24 +1249,28 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
       statusEl.textContent = 'kernel disabled';
       appendLog('[kernel] feature disabled');
     }
-  }catch{}
+  }catch(e){}
 
   // always reset kernel variables on page load
   if(!kernelDisabled){
     try{
       await apiFetch('/restart', { method:'POST' });
       appendLog('[kernel] restarted on load');
-    }catch{}
+  }catch(e){}
   }
   ensureWS();
   render();
   // Ensure edges are drawn after first layout pass
-  try{ requestAnimationFrame(()=>{ try{ syncEdgesViewport(); drawEdges(); }catch{} }); }catch{}
+  try{ requestAnimationFrame(()=>{ try{ syncEdgesViewport(); drawEdges(); }catch(e){} }); }catch(e){}
+  // Window resize: keep edges viewport and transforms in sync
+  try{
+    window.addEventListener('resize', ()=>{ try{ syncEdgesViewport(); drawEdges(); }catch(e){} });
+  }catch(e){}
   // 画像クリックで拡大
   document.addEventListener('click', (e)=>{
     const img = e.target && e.target.tagName==='IMG' ? e.target : null;
     if(img && img.closest('.preview')){
-      try{ openZoomOverlay(img.src); }catch{}
+  try{ openZoomOverlay(img.src); }catch(e){}
     }
   });
   // 空白クリックでQuick Add（接続モード中）
@@ -1173,10 +1278,10 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
     try{
       const d = e.detail || {}; const x = d.x, y = d.y, fromId = d.fromId;
       if(fromId){ openQuickAdd(x, y, fromId); }
-    }catch{}
+  }catch(e){}
   });
   // グループ更新イベントで再描画
-  document.addEventListener('pf:groups:changed', ()=>{ try{ renderSubsystems(); renderGroups(); saveToLocal(); }catch{} });
+  document.addEventListener('pf:groups:changed', ()=>{ try{ renderSubsystems(); renderGroups(); saveToLocal(); }catch(e){} });
   // マウス座標の追跡（キーボード貼り付け位置用）
   canvasWrap.addEventListener('mousemove', (e)=>{ lastMouseWorld = screenToWorldPoint(e.clientX, e.clientY); });
   // キーボードショートカット（コピー/切り取り/貼り付け/複製/削除）
@@ -1186,23 +1291,23 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
     const ids = Array.from(state.selection||[]);
     const withCtrl = (e.ctrlKey||e.metaKey);
     if(withCtrl && e.key.toLowerCase()==='c'){
-      if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; }catch{ clipboardGraph=null; } }
+  if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; }catch(e){ clipboardGraph=null; } }
       e.preventDefault();
     } else if(withCtrl && e.key.toLowerCase()==='x'){
-      if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch{} }
+  if(ids.length){ try{ clipboardGraph = makeSubgraph(ids); window.__pf_clipboardGraph = clipboardGraph; deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch(e){} }
       e.preventDefault();
     } else if(withCtrl && e.key.toLowerCase()==='v'){
       const g = window.__pf_clipboardGraph || clipboardGraph;
-      if(g){ try{ const newIds = pasteSubgraph(g, { x:(lastMouseWorld.x||100), y:(lastMouseWorld.y||100) }); setSelection(newIds); render(); saveToLocal(); }catch{} }
+  if(g){ try{ const newIds = pasteSubgraph(g, { x:(lastMouseWorld.x||100), y:(lastMouseWorld.y||100) }); setSelection(newIds); render(); saveToLocal(); }catch(e){} }
       e.preventDefault();
     } else if(withCtrl && e.key.toLowerCase()==='d'){
-      if(ids.length){ try{ const data = makeSubgraph(ids); const newIds = pasteSubgraph(data, { x:(lastMouseWorld.x||100)+20, y:(lastMouseWorld.y||100)+20 }); setSelection(newIds); render(); saveToLocal(); }catch{} }
+  if(ids.length){ try{ const data = makeSubgraph(ids); const newIds = pasteSubgraph(data, { x:(lastMouseWorld.x||100)+20, y:(lastMouseWorld.y||100)+20 }); setSelection(newIds); render(); saveToLocal(); }catch(e){} }
       e.preventDefault();
     } else if(e.key==='Delete'){
-      if(ids.length){ try{ deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch{} }
+  if(ids.length){ try{ deleteNodes(ids); setSelection([]); render(); saveToLocal(); }catch(e){} }
       e.preventDefault();
     } else if(e.key==='Escape'){
-      if(state.pendingSrc){ try{ clearGhost(); }catch{} try{ closeQuickAdd(); }catch{} state.pendingSrc=null; document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected')); e.preventDefault(); }
+  if(state.pendingSrc){ try{ clearGhost(); }catch(e){} try{ closeQuickAdd(); }catch(e){} state.pendingSrc=null; document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected')); e.preventDefault(); }
     }
   });
   // 接続モード中に外側をクリックしたらキャンセル
@@ -1213,15 +1318,59 @@ function updateNodePreview(id){ return updateNodePreviewMod(state, registry, id)
         const onCanvas = !!e.target.closest('#canvasWrap');
         if(onCanvas){
           const x = e.clientX; const y = e.clientY;
-          try{ openQuickAdd(x, y, state.pendingSrc); }catch{}
+          try{ openQuickAdd(x, y, state.pendingSrc); }catch(e){}
           e.preventDefault();
           return; // 接続モードは継続
         }
         // それ以外（UI等）をクリックしたらキャンセル
         state.pendingSrc = null; clearGhost(); closeQuickAdd(); document.querySelectorAll('.port.out.selected').forEach(p=> p.classList.remove('selected'));
       }
-    }catch{}
+  }catch(e){}
   });
+
+  // —— 右ペインのリサイズ ——
+  try{
+    // 初期幅の復元
+    const savedW = Number(localStorage.getItem('pf_right_w')||'');
+    if(savedW && savedW>=240 && savedW<=1600){
+      document.documentElement.style.setProperty('--right-w', savedW + 'px');
+    }
+  }catch(e){}
+  try{
+    if(rightResizer){
+      let dragging = false;
+      const onMove = (ev)=>{
+        if(!dragging) return;
+        try{
+          const x = ev.clientX || 0;
+          // 右列の幅 = 画面幅 - 仕切り位置
+          const vw = window.innerWidth || (document.documentElement.clientWidth||0);
+          let w = Math.max(240, Math.min(1600, vw - x));
+          document.documentElement.style.setProperty('--right-w', w + 'px');
+          try{ localStorage.setItem('pf_right_w', String(Math.round(w))); }catch(e){}
+        }catch(e){}
+      };
+      const onUp = ()=>{
+        if(!dragging) return;
+        dragging = false;
+        document.body.style.cursor = '';
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      rightResizer.addEventListener('mousedown', (ev)=>{
+        dragging = true;
+        document.body.style.cursor = 'col-resize';
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        ev.preventDefault();
+      });
+      // ダブルクリックで幅リセット
+      rightResizer.addEventListener('dblclick', ()=>{
+        document.documentElement.style.setProperty('--right-w', '380px');
+        try{ localStorage.removeItem('pf_right_w'); }catch(e){}
+      });
+    }
+  }catch(e){}
   // 追加: インタラクション初期化（最後に呼ぶ）
   window.__pf_clipboardGraph = clipboardGraph;
   initInteractionsMod({
@@ -1256,21 +1405,21 @@ async function renderImportsList(){
           const name = el.getAttribute('data-name')||'';
           const alias = el.getAttribute('data-alias')||'';
           const text = alias || name;
-          try{ e.dataTransfer.setData('text/plain', text); }catch{}
+          try{ e.dataTransfer.setData('text/plain', text); }catch(e){}
           e.dataTransfer.effectAllowed = 'copy';
           el.classList.add('dragging');
         });
         el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
       });
     }
-  }catch{ wrap.innerHTML = '<div style="color:#9ba3af">取得失敗</div>'; }
+  }catch(e){ wrap.innerHTML = '<div style="color:#9ba3af">取得失敗</div>'; }
   return box;
 }
 
 // expose boot for runtime
 async function boot(){
-  try{ ensureActionsAreaMod(); }catch{}
-  try{ ensureRunBarMod(globalRunBtn); }catch{}
+  try{ ensureActionsAreaMod(); }catch(e){}
+  try{ ensureRunBarMod(globalRunBtn); }catch(e){}
   // Ensure Packages button exists and wire it
   try{
     const actions = document.getElementById('actions');
@@ -1287,9 +1436,9 @@ async function boot(){
         if(pick.source==='pypi') await pipInstallAndImport(name, ''); else await introspectAndRegister(name);
       });
     }
-  }catch{}
-  try{ await __pf_init(); }catch{}
+  }catch(e){}
+  try{ await __pf_init(); }catch(e){}
 }
-try{ window.__PF_boot = boot; }catch{}
+try{ window.__PF_boot = boot; }catch(e){}
 
  

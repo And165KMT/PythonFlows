@@ -9,7 +9,7 @@ async function loadAutogen(){
 		try{
 			const tok = sessionStorage.getItem('pf_token');
 			if(tok) headers = { 'Authorization': 'Bearer ' + tok };
-		}catch{}
+		}catch(e){}
 		const res = await fetch('/api/autogen', { headers });
 		if(!res.ok) return;
 		const js = await res.json();
@@ -26,7 +26,7 @@ async function loadAutogen(){
 			registry.nodes.set(def.id, def);
 			registry.byPackage.get(pkgName).push(def.id);
 		}
-	}catch{}
+	}catch(e){}
 }
 
 // Setup viewport CSS variables to avoid cut off and enable vertical scrolling correctly
@@ -47,7 +47,7 @@ function setViewportVars(){
 			const pad = Math.round(r.height + 12); // small buffer to avoid overlap
 			document.documentElement.style.setProperty('--actions-h', pad + 'px');
 		}
-	}catch{}
+	}catch(e){}
 }
 setViewportVars();
 window.addEventListener('resize', setViewportVars);
@@ -55,10 +55,12 @@ window.addEventListener('orientationchange', setViewportVars);
 window.addEventListener('load', setViewportVars);
 
 // Load declared packages first for UI (do not pre-register Autogen nodes to keep toggles OFF)
-try{ await loadPackages(); }catch{}
+try{ await loadPackages(); }catch(e){}
+
+// Removed legacy fallback that auto-imported /pkg/python/index.js to ensure no implicit dependency on a default Python UI package.
 // Note: We intentionally do NOT call loadAutogen() here to avoid auto-importing packages.
 // Autogen nodes will be generated on-demand when the user toggles a package or installs from PyPI.
-try{ if(window.__PF_boot) window.__PF_boot(); }catch{}
+try{ if(window.__PF_boot) window.__PF_boot(); }catch(e){}
 // Recompute and observe actions height once DOM is ready
 try{
 	setViewportVars();
@@ -67,4 +69,4 @@ try{
 		__pf_actionsRO = new ResizeObserver(()=> setViewportVars());
 		__pf_actionsRO.observe(actions);
 	}
-}catch{}
+}catch(e){}

@@ -63,6 +63,10 @@
     </aside>
   </div>
 
-  <script type="module" src="/static/runtime.js"></script>
+  <script type="module">
+    // Cache-bust runtime to ensure latest JS after updates
+    const v = (window.__PF_VERSION || Date.now().toString(36));
+    import(`/static/runtime.js?v=${v}`);
+  </script>
 </body>
 </html>

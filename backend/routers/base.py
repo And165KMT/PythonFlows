@@ -41,14 +41,40 @@ async def index():
 # --- Fallback minimal APIs to satisfy frontend ---
 @router.get("/api/packages")
 async def api_packages(_: bool = Depends(require_auth)):
-    """Return a static list of built-in frontend packages.
-    This is duplicated in routers.packages for robustness.
+    """Return a static list of built-in packages aligned with routers.packages.
+
+    Keep static UI packages for pandas/sklearn and expose stdlib modules as
+    Autogen-only entries (entry == '').
     """
-    return [
-        {"name": "python", "label": "Python", "entry": "index.js"},
+    stdlib_autogen = [
+        ("json", "JSON"),
+        ("os", "OS"),
+        ("io", "IO"),
+        ("re", "Regex"),
+        ("math", "Math"),
+        ("statistics", "Statistics"),
+        ("random", "Random"),
+        ("itertools", "Itertools"),
+        ("functools", "Functools"),
+        ("datetime", "Datetime"),
+        ("pathlib", "Pathlib"),
+        ("csv", "CSV"),
+        ("glob", "Glob"),
+        ("shutil", "Shutil"),
+        ("subprocess", "Subprocess"),
+        ("tarfile", "Tarfile"),
+        ("zipfile", "Zipfile"),
+        ("pickle", "Pickle"),
+        ("textwrap", "Textwrap"),
+        ("urllib.request", "Urllib"),
+    ]
+    items = [
         {"name": "pandas", "label": "Pandas", "entry": "index.js"},
         {"name": "sklearn", "label": "Sklearn", "entry": "index.js"},
     ]
+    for nm, lab in stdlib_autogen:
+        items.append({"name": nm, "label": lab, "entry": ""})
+    return items
 
 
 @router.post("/restart")

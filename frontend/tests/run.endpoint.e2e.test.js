@@ -8,15 +8,16 @@ async function ping(url) {
   try {
     const res = await fetch(url)
     return res.ok
-  } catch {
+  } catch (e) {
     return false
   }
 }
 
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)) }
 
+const runE2E = !!process.env.BACKEND_URL
 describe('E2E /run executes code and streams output over WS', () => {
-  it('executes simple pandas flow and receives head()', async () => {
+  (runE2E ? it : it.skip)('executes simple pandas flow and receives head()', async () => {
     const ok = await ping(`${BASE}/health`)
     if (!ok) {
       console.warn('Skipping /run e2e; backend not reachable at', BASE)
@@ -57,7 +58,7 @@ describe('E2E /run executes code and streams output over WS', () => {
             done = true
           }
         }
-      } catch {}
+  } catch (e) {}
     })
     await new Promise(resolve => ws.once('open', resolve))
 

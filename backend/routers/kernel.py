@@ -4,11 +4,12 @@ import time
 import uuid
 import queue
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+import base64
 from fastapi.responses import JSONResponse
 from ..auth import require_auth, require_ws_auth
 from ..config import kernel_feature_enabled, auth_required, exec_timeout_seconds
 from ..exec_control import exec_registry, enforce_timeout_and_interrupt
-from ..kernel_runtime import get_kc, get_kernel_manager
+from ..kernel_runtime import get_kc, get_kernel_manager, iopub_gate
 
 
 router = APIRouter()
@@ -29,7 +30,12 @@ async def ws_stream(ws: WebSocket):
     try:
         while True:
             try:
-                msg = await asyncio.to_thread(kc.get_iopub_msg, 0.2)
+                # If another task (e.g., /api/variables) is reading IOPub, skip briefly
+                if iopub_gate.locked():
+                    await asyncio.sleep(0.05)
+                    continue
+                async with iopub_gate:
+                    msg = await asyncio.to_thread(kc.get_iopub_msg, 0.2)
             except queue.Empty:
                 await asyncio.sleep(0.05)
                 continue
@@ -37,7 +43,22 @@ async def ws_stream(ws: WebSocket):
                 await asyncio.sleep(0.05)
                 continue
             try:
-                await ws.send_text(json.dumps(msg))
+                # Sanitize message for JSON-serializable payloads
+                safe = dict(msg)
+                # jupyter_client may attach raw binary buffers that break json.dumps
+                if 'buffers' in safe:
+                    try:
+                        safe.pop('buffers', None)
+                    except Exception:
+                        pass
+                def _default(o):
+                    if isinstance(o, (bytes, bytearray)):
+                        try:
+                            return base64.b64encode(bytes(o)).decode('ascii')
+                        except Exception:
+                            return str(o)
+                    return str(o)
+                await ws.send_text(json.dumps(safe, default=_default))
             except Exception:
                 break
     except WebSocketDisconnect:

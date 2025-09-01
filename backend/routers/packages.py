@@ -10,19 +10,46 @@ router = APIRouter()
 
 @router.get("/api/packages")
 async def api_packages(_: bool = Depends(require_auth)):
-    """Return the list of frontend JS packages to load.
+    """Return the list of logical packages that the frontend can toggle.
 
-    Shape expected by frontend:
-      [ { name: string, label: string, entry: string } ]
+    The frontend treats packages in two ways:
+    - Static UI packages with JS under frontend/packages/<name>/index.js
+    - Autogen-only logical packages where we do not ship JS; toggling triggers
+      /api/introspect_module on the Python module to generate nodes.
 
-    We ship built-in packages in frontend/packages/* with an index.js entry.
+    Here we expose common stdlib modules as Autogen targets so users can import
+    and use basics (json, os, re, etc.) from the right pane. We also keep
+    pandas/sklearn as static UI packages.
     """
-    # Built-in packages present in the repo
+    stdlib_autogen = [
+        ("json", "JSON"),
+        ("os", "OS"),
+        ("io", "IO"),
+        ("re", "Regex"),
+        ("math", "Math"),
+        ("statistics", "Statistics"),
+        ("random", "Random"),
+        ("itertools", "Itertools"),
+        ("functools", "Functools"),
+        ("datetime", "Datetime"),
+        ("pathlib", "Pathlib"),
+        ("csv", "CSV"),
+        ("glob", "Glob"),
+        ("shutil", "Shutil"),
+        ("subprocess", "Subprocess"),
+        ("tarfile", "Tarfile"),
+        ("zipfile", "Zipfile"),
+        ("pickle", "Pickle"),
+        ("textwrap", "Textwrap"),
+        ("urllib.request", "Urllib"),
+    ]
     items = [
-        {"name": "python", "label": "Python", "entry": "index.js"},
         {"name": "pandas", "label": "Pandas", "entry": "index.js"},
         {"name": "sklearn", "label": "Sklearn", "entry": "index.js"},
     ]
+    # Autogen-only entries do not have JS entry files
+    for nm, lab in stdlib_autogen:
+        items.append({"name": nm, "label": lab, "entry": ""})
     return items
 
 

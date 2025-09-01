@@ -26,7 +26,16 @@ export function openQuickAdd(x, y, fromId, suggestionsForNode, addAndConnect) {
   if (sugg.length) { sWrap.style.display = 'block'; s.innerHTML = sugg.map(buttonPill).join(''); }
   else { sWrap.style.display = 'none'; s.innerHTML = ''; }
   const types = Array.from(registry.nodes.keys()).filter(t => !(registry.nodes.get(t)?.hidden));
-  all.innerHTML = types.map(itemHtml).join('');
+  // Relevance sort: autogen first, then title match, then type match
+  const scored = types.map(t=>{
+    const def = registry.nodes.get(t) || {};
+    const isAuto = def.origin==='autogen' ? 1 : 0;
+    const title = (def.title||'')+'';
+    const base = 0 + isAuto*10 + (title ? 1 : 0);
+    return { t, score: base, title: title.toLowerCase(), type: String(t).toLowerCase() };
+  });
+  scored.sort((a,b)=> b.score - a.score || a.title.localeCompare(b.title));
+  all.innerHTML = scored.map(x=> itemHtml(x.t)).join('');
   qa.style.display = 'block';
   const clickHandler = (ev) => {
     const btn = ev.target.closest('button[data-type]');
@@ -39,8 +48,20 @@ export function openQuickAdd(x, y, fromId, suggestionsForNode, addAndConnect) {
   qa.addEventListener('click', clickHandler, { once: true });
   inp.value = '';
   inp.oninput = () => {
-    const q = inp.value.toLowerCase();
-    const list = types.filter(t => t.toLowerCase().includes(q) || (registry.nodes.get(t)?.title || '').toLowerCase().includes(q));
+    const q = (inp.value||'').toLowerCase();
+    const list = types
+      .map(t=>({ t, def: registry.nodes.get(t)||{} }))
+      .filter(x=> x.t.toLowerCase().includes(q) || String(x.def.title||'').toLowerCase().includes(q))
+      .map(x=> ({ t: x.t, def: x.def, title: String(x.def.title||'').toLowerCase() }))
+      .sort((a,b)=>{
+        const aStarts = (a.title.startsWith(q) ? 2 : 0) + (a.t.toLowerCase().startsWith(q) ? 1 : 0);
+        const bStarts = (b.title.startsWith(q) ? 2 : 0) + (b.t.toLowerCase().startsWith(q) ? 1 : 0);
+        if(aStarts!==bStarts) return bStarts - aStarts;
+        const aAuto = (a.def.origin==='autogen')?1:0; const bAuto = (b.def.origin==='autogen')?1:0;
+        if(aAuto!==bAuto) return bAuto - aAuto;
+        return a.title.localeCompare(b.title);
+      })
+      .map(x=> x.t);
     all.innerHTML = list.map(itemHtml).join('');
   };
   setTimeout(() => {

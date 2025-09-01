@@ -3,7 +3,7 @@
 export function escapeHtml(s) {
   try {
     return String(s).replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
-  } catch {
+  } catch (e) {
     return String(s);
   }
 }
@@ -28,7 +28,7 @@ export function styleTableHtml(html) {
       table.style.fontSize = '12px';
       return wrapper.innerHTML;
     }
-  } catch {}
+  } catch (e) {}
   return html;
 }
 
@@ -49,5 +49,5 @@ export function injectBaseStyles() {
     .ctx-menu button{display:block; width:100%; text-align:left; padding:6px 10px; background:transparent; color:var(--text); border:0; cursor:pointer}
     .ctx-menu button:hover{background:#111824}`;
     document.head.appendChild(style);
-  } catch {}
+  } catch (e) {}
 }

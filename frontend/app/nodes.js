@@ -21,30 +21,204 @@ export const state = {
 export const registry = { packages: [], nodes: new Map(), byPackage: new Map() };
 // Track which JS packages have already executed their register() to avoid duplicate node lists
 const __loadedPackages = new Set();
+// Some packages are meant to be provided via Autogen only (no static /pkg files).
+// To avoid 404s from dynamic import, skip importing these and let Autogen populate nodes on demand.
+// Users may override by defining window.__PF_AUTOGEN_ONLY = ['pandas','sklearn', ...] before runtime.js loads.
+const AUTOGEN_ONLY = new Set(
+  (Array.isArray(window.__PF_AUTOGEN_ONLY) ? window.__PF_AUTOGEN_ONLY : ['pandas','sklearn']).map(x=> String(x))
+);
+
+// Register built-in control nodes that are always available (no static package file)
+// - python.ForEach: iterate over a list or DataFrame rows and execute a selected subsystem (group) per item
+try{
+  (function registerBuiltinControlNodes(){
+    // ensure logical package bucket exists
+    const pkgName = 'python';
+    if(!registry.packages.some(p=> p.name===pkgName)) registry.packages.push({ name: pkgName, label: 'Python', entry: '' });
+    if(!registry.byPackage.has(pkgName)) registry.byPackage.set(pkgName, []);
+
+    // Minimal Exec node
+    if(!registry.nodes.has('python.Exec')){
+      const defExec = {
+        id: 'python.Exec',
+        title: 'Exec',
+        category: 'Python',
+        inputType: 'Any',
+        outputType: 'Any',
+        origin: 'builtin',
+        defaultParams: { code: '' },
+        form(node){
+          const v = node.params || (node.params = { code: '' });
+          return `<div class="pf-field"><div class="pf-label"><span>Code</span></div><textarea name="code" placeholder="例: return len(src)\n# または\n# out = process(src)\n# （戻り値なしなら None）">${(v.code||'')}</textarea></div>`;
+        },
+        code(node, ctx){
+          const vout = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+          const p = node.params||{}; const code = String(p.code||'');
+          const src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || 'None') : 'None';
+          const seg = [];
+          seg.push(`__in = _fp_as_scalar(${src})`);
+          // expose convenient alias
+          seg.push(`src = __in`);
+          if(code.trim().startsWith('return ')){
+            const expr = code.trim().slice('return '.length);
+            seg.push(`try:\n ${vout} = eval(r'''${expr.replace(/'/g, "'\''")}''', _fp_env(), globals())\nexcept Exception:\n ${vout} = None`);
+          } else if(code.trim().startsWith('=')){
+            const expr = code.trim().slice(1);
+            seg.push(`try:\n ${vout} = eval(r'''${expr.replace(/'/g, "'\''")}''', _fp_env(), globals())\nexcept Exception:\n ${vout} = None`);
+          } else {
+            seg.push(`try:\n exec(r'''${code.replace(/'/g, "'\''")}''', globals(), globals())\nexcept Exception as __e:\n print('[Exec] error:', __e)`);
+            seg.push(`${vout} = globals().get('out', None)`);
+          }
+          seg.push(`print(${vout})`);
+          return seg;
+        }
+      };
+      registry.nodes.set(defExec.id, defExec);
+      const arr0 = registry.byPackage.get(pkgName);
+      if(!arr0.includes(defExec.id)) arr0.push(defExec.id);
+    }
+
+    const defForEach = {
+      id: 'python.ForEach',
+      title: 'ForEach (Subsystem)',
+      category: 'Python',
+      inputType: 'Any',
+      outputType: 'Any',
+      origin: 'builtin',
+      defaultParams: { group: '', iterVar: 'row', collect: '', limit: '', mode: 'list', dfKeyOrder: '' },
+      form(node){
+        const v = node.params || (node.params = JSON.parse(JSON.stringify(this.defaultParams)));
+        const groups = (state.groups||[]);
+        const opts = groups.map(g=> `<option value="${g.id}" ${v.group===g.id?'selected':''}>${(g.name||g.id)}</option>`).join('');
+        return [
+          `<div class="desc">選択したサブシステム（グループ）を入力データの各要素（またはDataFrameの各行）に対して繰り返し実行します。グループ内のノードは通常実行から除外され、ここでのみ実行されます。グループ内では ${v.iterVar||'row'} が現在の要素（dict/行/値）として利用できます。</div>`,
+          `<div class="pf-field"><div class="pf-label"><span>Subsystem (Group)</span></div><select name="group"><option value="">（未選択）</option>${opts}</select></div>`,
+          `<div class="pf-field"><div class="pf-label"><span>Iter var name</span></div><input name="iterVar" value="${v.iterVar||'row'}"></div>`,
+          `<div class="pf-field"><div class="pf-label"><span>Collect expression (optional)</span></div><input name="collect" placeholder="例: ${ (v.iterVar||'row') }['id'] または calc" value="${v.collect||''}"></div>`,
+          `<div class="pf-field"><div class="pf-label"><span>Collect mode</span></div><select name="mode"><option value="list" ${v.mode==='list'?'selected':''}>list</option><option value="dict" ${v.mode==='dict'?'selected':''}>dict (key=idx)</option><option value="df" ${v.mode==='df'?'selected':''}>DataFrame concat</option></select></div>`,
+          `<div class="pf-field"><div class="pf-label"><span>DF columns (optional)</span></div><input name="dfKeyOrder" placeholder="comma-separated keys" value="${v.dfKeyOrder||''}"></div>`,
+          `<div class="pf-field"><div class="pf-label"><span>Limit (optional)</span></div><input name="limit" type="number" step="1" min="0" placeholder="0=制限なし" value="${v.limit||''}"></div>`
+        ].join('\n');
+      },
+      code(node, ctx){
+        const vout = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
+        const p = node.params||{};
+        const gid = String(p.group||'');
+        const iterVar = String(p.iterVar||'row');
+        const collectExpr = String(p.collect||'');
+        const mode = String(p.mode||'list');
+        const dfKeyOrder = String(p.dfKeyOrder||'');
+        const limit = parseInt(p.limit||'0')||0;
+        // fetch subsystem definition
+        let ids = [];
+        try{ const g = getGroup(gid); if(g && Array.isArray(g.nodeIds)) ids = g.nodeIds.slice(); }catch(e){}
+        // Generate Python code for the subsystem; include only the group's own nodes
+        let subCode = '';
+        try{ subCode = genCodeForNodes(ids, false); }catch(e){}
+        // Base64 encode to embed safely into Python
+        let b64 = '';
+        try{ b64 = (typeof btoa==='function')? btoa(unescape(encodeURIComponent(subCode||''))) : ''; }catch(e){ b64=''; }
+        const src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || 'None') : 'None';
+        const seg = [];
+        seg.push(`# ForEach(SubSystem): group=${gid||'-'} iterVar=${iterVar}`);
+        seg.push(`import base64 as _b64`);
+        seg.push(`__pf_sub_b64 = r'''${b64}'''`);
+        seg.push(`__pf_sub_code = ''`);
+        seg.push(`try:\n __pf_sub_code = _b64.b64decode(__pf_sub_b64.encode('utf-8')).decode('utf-8')\nexcept Exception:\n __pf_sub_code = ''`);
+        seg.push(`__src = _fp_as_scalar(${src})`);
+        seg.push(`__iter = None`);
+        seg.push(`try:\n import pandas as _pd\n if hasattr(__src, 'to_dict'):\n  __iter = __src.to_dict('records')\nexcept Exception:\n pass`);
+        seg.push(`if __iter is None:\n try:\n  __iter = list(__src)\n except Exception:\n  __iter = []`);
+  seg.push(`__acc = []`);
+  seg.push(`__dict_acc = {}`);
+  seg.push(`__df_acc = None`);
+        seg.push(`__i = 0`);
+        seg.push(`for __item in __iter:`);
+        seg.push(`  if ${limit} and __i>=${limit}: break`);
+        seg.push(`  globals()[r'''${iterVar}'''] = __item`);
+        seg.push(`  try:\n   exec(__pf_sub_code, globals(), globals())\n  except Exception as __e:\n   print('[ForEach] error:', __e)`);
+  seg.push(`  __val = None`);
+  seg.push(`  __ce = r'''${collectExpr.replace(/'/g, "'\''")}'''`);
+        seg.push(`  if __ce:\n   try:\n    __val = eval(__ce, _fp_env(), globals())\n   except Exception:\n    __val = None`);
+  seg.push(`  if __ce:\n   __v = __val\n  else:\n   __v = __item`);
+  seg.push(`  if r'''${mode}''' == 'dict':\n   __dict_acc[__i] = __v\n  elif r'''${mode}''' == 'df':\n   try:\n    import pandas as _pd\n    if isinstance(__v, dict):\n     __row = __v\n    elif hasattr(__v, 'to_dict'):\n     __row = __v.to_dict()\n    else:\n     __row = {'value': __v}\n    __cols = [c.strip() for c in r'''${dfKeyOrder}'''.split(',') if c.strip()]\n    if not __cols:\n     __cols = list(__row.keys())\n    __df = _pd.DataFrame([{k: __row.get(k) for k in __cols}])\n    __df_acc = (__df if __df_acc is None else _pd.concat([__df_acc, __df], ignore_index=True))\n   except Exception as __e:\n    print('[ForEach:df] error:', __e)\n  else:\n   __acc.append(__v)`);
+        seg.push(`  __i += 1`);
+  seg.push(`if r'''${mode}''' == 'dict':\n ${vout} = __dict_acc\nelif r'''${mode}''' == 'df':\n ${vout} = __df_acc\nelse:\n ${vout} = __acc`);
+        return seg;
+      }
+    };
+    registry.nodes.set(defForEach.id, defForEach);
+    const arr = registry.byPackage.get(pkgName);
+    if(!arr.includes(defForEach.id)) arr.push(defForEach.id);
+  })();
+}catch(e){}
 
 // Build a dynamic node definition from an autogen spec
 // Spec shape: { id, title, category, inputType, outputType, params:[{name, default, ui, hidden?, advanced?, when?}],
 //   pkg, call:{ target, kind:'function'|'constructor'|'method', receiver:string|null, dfParam:string|null, returnsSelf?:boolean } }
 export function makeAutogenDef(spec){
+  // Heuristics to enrich param UI
+  function isBoolName(n){
+    const s = String(n||'').toLowerCase();
+    return s.endsWith('able') || s==='inplace' || s==='copy' || s==='ascending' || s==='drop' || s==='sorted' || s==='normalize' || s.startsWith('return_') || s==='shuffle';
+  }
+    function getEnumForParam(name, target){
+      const n = String(name||'').toLowerCase();
+      const tgt = String(target||'');
+    if(n==='how') return ['left','right','inner','outer','cross'];
+    if(n==='axis') return [0,1,'index','columns'];
+    if(n==='aggfunc' || n==='agg' || n==='func') return ['mean','sum','max','min','count','median','std','var'];
+    if(n==='method' && /fillna|interpolate/.test(tgt)) return ['ffill','bfill','pad','backfill'];
+    if(n==='strategy' && tgt.includes('sklearn')) return ['mean','median','most_frequent','constant'];
+    if(n==='solver' && tgt.includes('sklearn')) return ['lbfgs','liblinear','newton-cg','newton-cholesky','sag','saga'];
+    if(n==='criterion' && tgt.includes('sklearn.tree')) return ['gini','entropy','log_loss'];
+    if(n==='penalty' && tgt.includes('sklearn.linear_model')) return ['l1','l2','elasticnet','none'];
+    return null;
+  }
+  function inferParams(rawParams, target){
+    const out = [];
+    for(const p of (rawParams||[])){
+      const cp = { ...p };
+      const defv = cp.default;
+      // Bool by default value or name
+      if(typeof defv==='boolean' || isBoolName(cp.name)) cp.ui = 'bool';
+      // Number by default type or common numeric names
+      if(cp.ui!=='bool' && (typeof defv==='number' || /^(n_|num|count|seed|random_state|alpha|gamma|eta|lr|rate|bins?|limit|topk|k)$/.test(String(cp.name||'').toLowerCase()))) cp.ui = 'number';
+      // Enums by common params
+      const en = getEnumForParam(cp.name, target);
+      if(en){ cp.ui = 'select'; cp.enum = en; }
+      out.push(cp);
+    }
+    return out;
+  }
+  const call = spec?.call || {};
+  const enrichedParams = inferParams(spec?.params||[], call.target||'');
+  const enrichedSpec = { ...spec, params: enrichedParams };
   const id = spec.id || `autogen.${Math.random().toString(36).slice(2,8)}`;
   const def = {
     id,
-    title: spec.title || id,
-    category: spec.category || 'Auto',
-    inputType: spec.inputType || 'Any',
-    outputType: spec.outputType || 'Any',
+    title: enrichedSpec.title || id,
+    category: enrichedSpec.category || 'Auto',
+    inputType: enrichedSpec.inputType || 'Any',
+    outputType: enrichedSpec.outputType || 'Any',
     // mark as autogen for UI優先度
     origin: 'autogen',
-    defaultParams: Object.fromEntries((spec.params||[]).map(p=> [p.name, p.default])),
-    form(node){
+    defaultParams: Object.fromEntries((enrichedSpec.params||[]).map(p=> [p.name, p.default])),
+  form(node, ctx){
       const v = node.params || (node.params = this.defaultParams ? JSON.parse(JSON.stringify(this.defaultParams)) : {});
-      const fields = (spec.params||[]).filter(p=> !p.hidden);
+      const fields = (enrichedSpec.params||[]).filter(p=> !p.hidden);
       function shown(p){ if(!p.when) return true; const m = String(p.when).split('='); if(m.length!==2) return true; const [k,val] = m; return String(v[k]||'')===String(val); }
       function inputFor(p){
         const name = p.name; const label = p.label||name; const val = v[name] ?? p.default ?? '';
         const ui = String(p.ui||'string').toLowerCase();
         const head = `<div class="pf-label"><span class="param-port" data-param="${name}" title="Connect input to ${name}"></span><span>${label}</span></div>`;
         const bound = v['__bound__'+name] || '';
+        // column suggestions via datalist from upstream
+  const cols = (ctx && typeof ctx.getUpstreamColumns==='function') ? (ctx.getUpstreamColumns()||[]) : [];
+  const nm = String(name||'').toLowerCase();
+  const isColLike = nm==='column' || nm==='by' || nm==='x' || nm==='y' || nm==='on' || nm==='left_on' || nm==='right_on' || nm==='columns' || nm==='subset' || nm==='index' || nm==='values' || nm==='id_vars' || nm==='value_vars' || nm.includes('col');
+  const hasColSuggest = isColLike && cols.length>0;
+        const listId = `cols_${node.id}_${name}`;
         if(ui==='select' && Array.isArray(p.enum)){
           const opts = p.enum.map(x=> `<option value="${x}" ${String(val)===String(x)?'selected':''}>${x}</option>`).join('');
           return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<select name="${name}">${opts}</select></div>`;
@@ -61,20 +235,47 @@ export function makeAutogenDef(spec){
         if(ui==='upload'){
           return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<div style="display:flex; gap:6px"><input name="${name}" value="${val||''}" placeholder="Uploaded filename" style="flex:1" readonly><button class="upload-file" title="upload file">Upload...</button></div></div>`;
         }
+        // default string with column datalist suggestions if available
+        if(hasColSuggest){
+          const opts = cols.map(c=> `<option value="${String(c).replace(/["<>]/g,'')}"></option>`).join('');
+          return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<input list="${listId}" name="${name}" value="${val||''}"><datalist id="${listId}">${opts}</datalist></div>`;
+        }
         return `<div class="pf-field ${bound?'bound':''}" data-param="${name}" data-bound="${bound}">${head}<input name="${name}" value="${val||''}"></div>`;
       }
       const basic = fields.filter(p=> !p.advanced && shown(p)).map(inputFor).join('\n');
       const adv = fields.filter(p=> p.advanced && shown(p)).map(inputFor).join('\n');
-      const desc = spec.desc ? `<div class="desc">${String(spec.desc).replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</div>` : '';
-      return `${desc}${basic}${adv? `<details style=\"margin-top:8px\"><summary style=\"cursor:pointer; user-select:none\">Advanced</summary>${adv}</details>`:''}`;
+  const desc = enrichedSpec.desc ? `<div class="desc">${String(enrichedSpec.desc).replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</div>` : '';
+  // ForEach integration: offer an optional toggle to use current iterVar as source when no upstream is connected
+  const foreachAssist = `<div class="pf-field"><div class="pf-label"><span>Use ForEach iter as source</span></div><select name="__use_iter_src"><option value="">auto (off)</option><option value="1" ${(v['__use_iter_src']?'selected':'')}>on</option></select></div>`;
+  return `${desc}${basic}${adv? `<details style=\"margin-top:8px\"><summary style=\"cursor:pointer; user-select:none\">Advanced</summary>${adv}</details>`:''}${foreachAssist}`;
     },
-    code(node, ctx){
+  code(node, ctx){
       const v = 'v_'+node.id.replace(/[^a-zA-Z0-9_]/g,'');
       const p = node.params||{};
-      const call = spec.call || {};
-      const paramsSpec = Array.isArray(spec.params)? spec.params : [];
-      const src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || null) : null;
-      const srcs = (ctx && typeof ctx.srcVars==='function') ? (ctx.srcVars(node) || []) : (src? [src] : []);
+      const call = enrichedSpec.call || {};
+      const paramsSpec = Array.isArray(enrichedSpec.params)? enrichedSpec.params : [];
+      // Helper: convert JS values (often strings from form inputs) to Python literals safely
+      const toPy = (val)=>{
+        // Treat explicit sentinel strings as Python literals
+        if(val===null || val===undefined || String(val)==='None') return 'None';
+        const s = String(val);
+        if(s==='True' || val===true) return 'True';
+        if(s==='False' || val===false) return 'False';
+        // Leave numbers as-is when provided as numbers
+        if(typeof val==='number' && Number.isFinite(val)) return String(val);
+        // Fallback: JSON string encoding
+        return JSON.stringify(val);
+      };
+      let src = (ctx && typeof ctx.srcVar==='function') ? (ctx.srcVar(node) || null) : null;
+      const srcs0 = (ctx && typeof ctx.srcVars==='function') ? (ctx.srcVars(node) || []) : (src? [src] : []);
+      let srcs = srcs0;
+      // ForEach: allow auto-binding current iter value when no upstream
+      try{
+        if((!src || srcs.length===0) && node && node.params && node.params.__use_iter_src){
+          src = '__pf_iter_val';
+          srcs = [src];
+        }
+      }catch(e){}
       const provided = new Set();
       const activeParams = paramsSpec.filter(x=> (!x.when || String(p[String(x.when).split('=')[0]]||'')===String(String(x.when).split('=')[1]||'')));
       const kwargs = [];
@@ -82,7 +283,7 @@ export function makeAutogenDef(spec){
         if(['mode','inline','path','upload','dir'].includes(x.name)) continue;
         const bound = p['__bound__'+x.name];
         if(bound!=null){ kwargs.push(`${x.name}=_fp_as_scalar(${bound})`); provided.add(x.name); continue; }
-        if(p[x.name]!==undefined){ kwargs.push(`${x.name}=${JSON.stringify(p[x.name])}`); provided.add(x.name); }
+        if(p[x.name]!==undefined){ kwargs.push(`${x.name}=${toPy(p[x.name])}`); provided.add(x.name); }
       }
       const addKw = (k, expr)=>{ const key = String(k||''); if(key && !provided.has(key)) { kwargs.unshift(`${key}=${expr}`); provided.add(key); } };
       const target = call.target || 'None';
@@ -108,7 +309,7 @@ export function makeAutogenDef(spec){
         if(call.returnsSelf) seg.push(`${v} = ${recv}`);
       } else if(kind==='constructor'){
         seg.push(`${v} = ${target}(${kwargs.join(', ')})`);
-      } else { // function
+  } else { // function
         if(srcs && srcs.length){
           for(let i=0; i<Math.min(srcs.length, srcParams.length); i++){
             const k = srcParams[i]; const s = srcs[i]; if(k){ addKw(k, `_fp_as_scalar(${String(s)})`); }
@@ -121,7 +322,15 @@ export function makeAutogenDef(spec){
         }
         seg.push(`${v} = ${target}(${kwargs.join(', ')})`);
       }
+      // Always print the object for logging
       seg.push(`print(${v})`);
+      // Special preview for HTTP responses (requests.Response)
+      try{
+        const tgt = String(call.target||'');
+        if(tgt.startsWith('requests.')){
+          seg.push(`\ntry:\n import requests as _rq\n if isinstance(${v}, _rq.Response):\n  _fp_preview(str(${v}.status_code) + ' ' + (${v}.headers.get('content-type','') or ''), r'''${node.id}''')\n  try:\n   _fp_preview((${v}.text or '')[:2000], r'''${node.id}''')\n  except Exception:\n   pass\nexcept Exception:\n pass`);
+        }
+      }catch(e){}
       return seg;
     }
   };
@@ -261,7 +470,7 @@ export function saveToLocal(){
       groups: state.groups
     };
     localStorage.setItem(LS_KEY, JSON.stringify(data));
-  }catch{}
+  }catch(e){}
 }
 export function restoreFromLocal(){
   try{
@@ -285,7 +494,7 @@ export function restoreFromLocal(){
       state.selection = new Set();
       return true;
     }
-  }catch{}
+  }catch(e){}
   return false;
 }
 
@@ -333,15 +542,15 @@ export function suggestionsForNode(fromId){
   const has = (id)=> registry.nodes.has(id);
   const acc = [];
   if(t.startsWith('pandas.')){
-    ['pandas.SelectColumns','pandas.FilterRows','pandas.SortValues','pandas.GroupByAggregate','pandas.ValueCounts','pandas.PivotTable','pandas.Melt','pandas.AddColumn','pandas.DropNA','pandas.FillNA','pandas.RenameColumns','pandas.HeadTail','pandas.Merge','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.CorrHeatmap','python.Exec','python.If','python.For','python.While','python.FileWriteCSV','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
+  ['pandas.SelectColumns','pandas.FilterRows','pandas.SortValues','pandas.GroupByAggregate','pandas.ValueCounts','pandas.PivotTable','pandas.Melt','pandas.AddColumn','pandas.DropNA','pandas.FillNA','pandas.RenameColumns','pandas.HeadTail','pandas.Merge','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.CorrHeatmap','python.Exec','python.ForEach','python.FileWriteCSV','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   } else if(t==='numpy.RandomNormal'){
-    ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.KMeans','sklearn.ClusterPlot','python.Exec','python.For','python.While','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
+  ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.KMeans','sklearn.ClusterPlot','python.Exec','python.ForEach','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   } else if(t.startsWith('sklearn.')){
-    const extras = ['sklearn.KMeans','sklearn.ClusterPlot','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.TrainTestSplit','python.Exec','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'];
+  const extras = ['sklearn.KMeans','sklearn.ClusterPlot','pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','sklearn.StandardScaler','sklearn.TrainTestSplit','python.Exec','python.ForEach','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'];
     if(t==='sklearn.TrainTestSplit') extras.unshift('sklearn.SplitSelect');
     extras.forEach(x=> has(x)&&acc.push(x));
   } else {
-    ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.FilterRows','pandas.SelectColumns','python.Exec','python.FileReadText','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
+  ['pandas.XYPlot','pandas.BarPlot','pandas.DistributionPlot','pandas.FilterRows','pandas.SelectColumns','python.Exec','python.ForEach','python.FileReadText','python.Math','python.SetGlobal','python.ListVariables','python.GetGlobal'].forEach(x=> has(x)&&acc.push(x));
   }
   const seen=new Set(); const out=[]; for(const x of acc){ if(!seen.has(x)){ seen.add(x); out.push(x); if(out.length>=8) break; } }
   return out;
@@ -388,6 +597,16 @@ export function setPreviewModeProvider(fn){ if(typeof fn==='function') previewMo
 export function genCode(){
   const pmode = previewModeProvider();
   const order = topoSort();
+  // Exclude nodes that are part of subsystems referenced by python.ForEach nodes
+  const excluded = new Set();
+  try{
+    const foreachNodes = state.nodes.filter(n=> n.type==='python.ForEach');
+    foreachNodes.forEach(n=>{
+      const gid = String((n.params&&n.params.group)||'');
+      const g = getGroup(gid);
+      if(g && Array.isArray(g.nodeIds)) g.nodeIds.forEach(id=> excluded.add(id));
+    });
+  }catch(e){}
   // Build minimal header; add pandas/matplotlib only if needed by nodes
   const header = [ 'import io', 'import glob', 'import importlib',
     '# --- FlowPython helpers (shared) ---',
@@ -441,8 +660,8 @@ export function genCode(){
     '        try:',
     '            globals()[__name] = eval(__expr, env, globals())',
     '        except Exception:',
-    '            try:',
-    '                exec(f"{__name} = (" + __expr + ")", globals())',
+  '            try:',
+  '                exec(__name + " = (" + __expr + ")", globals())',
     '            except Exception:',
     '                pass',
     '    rows = []',
@@ -452,52 +671,132 @@ export function genCode(){
     '        if not __name: continue',
     '        try:',
     '            __val = globals().get(__name, None)',
-    '            rows.append((__name, type(__val).__name__, repr(__val)[:200]))',
+    "            rows.append({'name': __name, 'type': type(__val).__name__, 'repr': repr(__val)[:200]})",
     '        except Exception:',
-    "            rows.append((__name, 'unknown', '<unrepr>'))",
-    "    return pd.DataFrame(rows, columns=['name','type','repr'])",
+    "            rows.append({'name': __name, 'type': 'unknown', 'repr': '<unrepr>'})",
+    '    return rows',
     '',
-    'def _fp_preview(df, nid):',
+    'def _fp_preview(x, nid):',
+    '    def _esc(s):',
+    "        try: return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')",
+    '        except Exception: return str(s)',
     '    try:',
-    '        print(f"[[PREVIEW:{nid}:HEAD]]" + df.head().to_string())',
-    '        print(f"[[PREVIEW:{nid}:HEADHTML]]" + df.head().to_html())',
+    '        import pandas as _pd',
+    '        if isinstance(x, _pd.DataFrame):',
+    '            try:',
+    '                print(f"[[PREVIEW:{nid}:HEAD]]" + x.head().to_string())',
+    '                print(f"[[PREVIEW:{nid}:HEADHTML]]" + x.head().to_html())',
+    '            except Exception: pass',
+    '            try:',
+    '                print(f"[[PREVIEW:{nid}:DESC]]" + x.describe().to_string())',
+    '                print(f"[[PREVIEW:{nid}:DESCHTML]]" + x.describe().to_html())',
+    '            except Exception:',
+    '                print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+    '            return',
     '    except Exception:',
     '        pass',
+    '    # Fallbacks for built-in Python types',
     '    try:',
-    '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
-    '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
+    '        import itertools as _it',
+    '        if isinstance(x, list) and (len(x)==0 or isinstance(x[0], dict)):',
+    '            # list-of-dicts table',
+    '            head = list(x[:5])',
+    '            cols = []',
+    '            for r in head:',
+    '                for k in (r.keys() if isinstance(r, dict) else []):',
+    '                    if k not in cols: cols.append(k)',
+  "            txt_rows = [\"\\t\".join([str(c) for c in cols])]",
+  '            for r in head:',
+  "                row = [str((r.get(c, \"\")) if isinstance(r, dict) else \"\") for c in cols]",
+  "                txt_rows.append(\"\\t\".join(row))",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + \"\\n\".join(txt_rows))",
+  "            html = [\"<table><thead><tr>\" + \"\".join([f\"<th>{_esc(c)}</th>\" for c in cols]) + \"</tr></thead><tbody>\"]",
+  '            for r in head:',
+  "                html.append(\"<tr>\" + \"\".join([\"<td>\"+_esc(r.get(c, ''))+\"</td>\" for c in cols]) + \"</tr>\")",
+  "            html.append(\"</tbody></table>\")",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + \"\".join(html))",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=list(len={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>list len={len(x)}</pre>\")",
+    '            return',
+    '        if isinstance(x, dict):',
+  "            items = list(x.items())[:10]",
+  "            txt = \"\\n\".join([f\"{k}: {v}\" for k,v in items])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<table><tbody>\" + \"\".join([f\"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>\" for k,v in items]) + \"</tbody></table>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=dict(size={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>dict size={len(x)}</pre>\")",
+    '            return',
+    '        if isinstance(x, (list, tuple, set)):',
+    '            head = list(_it.islice(x, 5))',
+  "            txt = \"\\n\".join([repr(i) for i in head])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<pre>\" + _esc(txt) + \"</pre>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  '            try:',
+  '                ln = len(list(x)) if not isinstance(x, set) else len(x)',
+  '            except Exception:',
+  '                ln = len(head)',
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}(len={ln})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)} len={ln}</pre>\")",
+    '            return',
+    '        # default scalar/string',
+  "        s = str(x)",
+  "        print(f\"[[PREVIEW:{nid}:HEAD]]\" + s)",
+  "        print(f\"[[PREVIEW:{nid}:HEADHTML]]<pre>\" + _esc(s) + \"</pre>\")",
+  "        print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}\")",
+  "        print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)}</pre>\")",
     '    except Exception:',
-    '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+    '        pass',
     '',
   '__pf_hash = globals().get("__pf_hash", {})',
     'def _fp_should_run(nid, h):',
-  '    d = globals().get("__pf_hash", {})',
-    '    prev = d.get(nid)',
-    '    if prev == h:',
-    '        print(f"[[SKIP:{nid}]]")',
-    '        return False',
-    '    d[nid] = h',
-    '    globals()["__pf_hash"] = d',
+  '    # Skip 機能をマスク：常に実行する',
+  '    try:',
+  '        d = globals().get("__pf_hash", {})',
+  '        d[nid] = h',
+  '        globals()["__pf_hash"] = d',
+  '    except Exception:',
+  '        pass',
   '    return True',
   '',
   'def _fp_as_scalar(x):',
   '    try:',
-  '        import pandas as _pd',
-  '        if isinstance(x, _pd.DataFrame):',
-  '            try:',
-  '                if getattr(x, "size", 0) == 1:',
-  '                    return x.values.tolist()[0][0]',
-  '                if "text" in x.columns and len(x)==1:',
-  '                    return str(x["text"].iloc[0])',
-  '            except Exception: pass',
-  '            try:',
-  '                return str(x.iloc[0,0])',
-  '            except Exception:',
-  '                return str(x)',
-  '        import numpy as _np',
-  '        if isinstance(x, _np.ndarray):',
-  '            try: return x.item()',
-  '            except Exception: pass',
+  '        # pandas DataFrame -> scalar extraction (optional)',
+  '        try:',
+  '            import pandas as _pd',
+  '            if isinstance(x, _pd.DataFrame):',
+  '                try:',
+  '                    if getattr(x, "size", 0) == 1:',
+  '                        return x.values.tolist()[0][0]',
+  '                    if "text" in x.columns and len(x)==1:',
+  '                        return str(x["text"].iloc[0])',
+  '                except Exception: pass',
+  '                try:',
+  '                    return str(x.iloc[0,0])',
+  '                except Exception:',
+  '                    return str(x)',
+  '        except Exception:',
+  '            pass',
+  '        # numpy scalar (optional)',
+  '        try:',
+  '            import numpy as _np',
+  '            if isinstance(x, _np.ndarray):',
+  '                try: return x.item()',
+  '                except Exception: pass',
+  '        except Exception:',
+  '            pass',
+  '        # list/dict common extraction patterns',
+  '        if isinstance(x, list):',
+  '            if len(x)==1:',
+  '                e = x[0]',
+  '                if isinstance(e, dict):',
+  "                    if 'text' in e: return e.get('text')",
+  "                    if len(e)==1: return next(iter(e.values()))",
+  '                return e',
+  '        if isinstance(x, dict):',
+  "            if 'text' in x and isinstance(x['text'], (str, bytes)): return x['text']",
+  '            if len(x)==1: return next(iter(x.values()))',
   '        if isinstance(x, (list, tuple)) and len(x)==1:',
   '            return x[0]',
   '        return x',
@@ -508,9 +807,7 @@ export function genCode(){
   const types = order.map(n=> n?.type||'');
   const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
   const pandasPythonNodes = new Set([
-    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
-    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
-    'python.Enumerate','python.Assert','python.Repeat'
+  // 可能な限りpandasに依存しないように縮小（現状ゼロ）
   ]);
   const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
   const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
@@ -526,7 +823,7 @@ export function genCode(){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(excluded.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ const base = JSON.stringify(n.params||{}); const hasIn = incomingCount(n)>0; return (hasIn? (Date.now().toString(36)+base) : base); }catch(e){return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${btoa(unescape(encodeURIComponent(''+phash))).slice(0,24)}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
      const allowPreview = (pmode==='all');
      if(allowPreview){
        lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -590,75 +887,155 @@ export function genCodeForNodes(ids, includeUpstream=true){
     '    except Exception:',
     '        return None',
     '',
-    'def _fp_set_globals(text):',
-    '    lines = str(text).splitlines()',
-    '    env = _fp_env()',
-    '    for __ln in lines:',
-    '        __ln = __ln.strip()',
-    '        if not __ln or __ln.startswith("#"): continue',
-    '        __name, __eq, __expr = __ln.partition("=")',
-    '        __name = __name.strip(); __expr = __expr.strip()',
-    '        if not __name or not __expr: continue',
-    '        try:',
-    '            globals()[__name] = eval(__expr, env, globals())',
-    '        except Exception:',
-    '            try:',
-    '                exec(f"{__name} = (" + __expr + ")", globals())',
-    '            except Exception:',
-    '                pass',
-    '    rows = []',
-    '    for __ln in lines:',
-    '        __name, __eq, __expr = __ln.partition("=")',
-    '        __name = __name.strip()',
-    '        if not __name: continue',
-    '        try:',
-    '            __val = globals().get(__name, None)',
-    "            rows.append((__name, type(__val).__name__, repr(__val)[:200]))",
-    '        except Exception:',
-    "            rows.append((__name, 'unknown', '<unrepr>'))",
-  "    return pd.DataFrame(rows, columns=['name','type','repr'])",
-    '',
-    'def _fp_preview(df, nid):',
-    '    try:',
-    '        print(f"[[PREVIEW:{nid}:HEAD]]" + df.head().to_string())',
-    '        print(f"[[PREVIEW:{nid}:HEADHTML]]" + df.head().to_html())',
-    '    except Exception:',
-    '        pass',
-    '    try:',
-    '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
-    '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
-    '    except Exception:',
-  '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+  'def _fp_set_globals(text):',
+  '    lines = str(text).splitlines()',
+  '    env = _fp_env()',
+  '    for __ln in lines:',
+  '        __ln = __ln.strip()',
+  '        if not __ln or __ln.startswith("#"): continue',
+  '        __name, __eq, __expr = __ln.partition("=")',
+  '        __name = __name.strip(); __expr = __expr.strip()',
+  '        if not __name or not __expr: continue',
+  '        try:',
+  '            globals()[__name] = eval(__expr, env, globals())',
+  '        except Exception:',
+  '            try:',
+  '                exec(__name + " = (" + __expr + ")", globals())',
+  '            except Exception:',
+  '                pass',
+  '    rows = []',
+  '    for __ln in lines:',
+  '        __name, __eq, __expr = __ln.partition("=")',
+  '        __name = __name.strip()',
+  '        if not __name: continue',
+  '        try:',
+  '            __val = globals().get(__name, None)',
+  "            rows.append({'name': __name, 'type': type(__val).__name__, 'repr': repr(__val)[:200]})",
+  '        except Exception:',
+  "            rows.append({'name': __name, 'type': 'unknown', 'repr': '<unrepr>'})",
+  '    return rows',
   '',
-  '__pf_hash = globals().get("__pf_hash", {})',
-  'def _fp_should_run(nid, h):',
-  '    d = globals().get("__pf_hash", {})',
-  '    prev = d.get(nid)',
-  '    if prev == h:',
-  '        print(f"[[SKIP:{nid}]]")',
-  '        return False',
-  '    d[nid] = h',
-  '    globals()["__pf_hash"] = d',
-  '    return True',
-  '',
-  'def _fp_as_scalar(x):',
+  'def _fp_preview(x, nid):',
+  '    def _esc(s):',
+  "        try: return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')",
+  '        except Exception: return str(s)',
   '    try:',
   '        import pandas as _pd',
   '        if isinstance(x, _pd.DataFrame):',
   '            try:',
-  '                if getattr(x, "size", 0) == 1:',
-  '                    return x.values.tolist()[0][0]',
-  '                if "text" in x.columns and len(x)==1:',
-  '                    return str(x["text"].iloc[0])',
+  '                print(f"[[PREVIEW:{nid}:HEAD]]" + x.head().to_string())',
+  '                print(f"[[PREVIEW:{nid}:HEADHTML]]" + x.head().to_html())',
   '            except Exception: pass',
   '            try:',
-  '                return str(x.iloc[0,0])',
+  '                print(f"[[PREVIEW:{nid}:DESC]]" + x.describe().to_string())',
+  '                print(f"[[PREVIEW:{nid}:DESCHTML]]" + x.describe().to_html())',
   '            except Exception:',
-  '                return str(x)',
-  '        import numpy as _np',
-  '        if isinstance(x, _np.ndarray):',
-  '            try: return x.item()',
-  '            except Exception: pass',
+  '                print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+  '            return',
+  '    except Exception:',
+  '        pass',
+  '    # Fallbacks for built-in Python types',
+  '    try:',
+  '        import itertools as _it',
+  '        if isinstance(x, list) and (len(x)==0 or isinstance(x[0], dict)):',
+  '            # list-of-dicts table',
+  '            head = list(x[:5])',
+  '            cols = []',
+  '            for r in head:',
+  '                for k in (r.keys() if isinstance(r, dict) else []):',
+  '                    if k not in cols: cols.append(k)',
+  "            txt_rows = [\"\\t\".join([str(c) for c in cols])]",
+  '            for r in head:',
+  "                row = [str((r.get(c, \"\")) if isinstance(r, dict) else \"\") for c in cols]",
+  "                txt_rows.append(\"\\t\".join(row))",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + \"\\n\".join(txt_rows))",
+  "            html = [\"<table><thead><tr>\" + \"\".join([f\"<th>{_esc(c)}</th>\" for c in cols]) + \"</tr></thead><tbody>\"]",
+  '            for r in head:',
+  "                html.append(\"<tr>\" + \"\".join([\"<td>\"+_esc(r.get(c, ''))+\"</td>\" for c in cols]) + \"</tr>\")",
+  "            html.append(\"</tbody></table>\")",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + \"\".join(html))",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=list(len={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>list len={len(x)}</pre>\")",
+  '            return',
+  '        if isinstance(x, dict):',
+  "            items = list(x.items())[:10]",
+  "            txt = \"\\n\".join([f\"{k}: {v}\" for k,v in items])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<table><tbody>\" + \"\".join([f\"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>\" for k,v in items]) + \"</tbody></table>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=dict(size={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>dict size={len(x)}</pre>\")",
+  '            return',
+  '        if isinstance(x, (list, tuple, set)):',
+  '            head = list(_it.islice(x, 5))',
+  "            txt = \"\\n\".join([repr(i) for i in head])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<pre>\" + _esc(txt) + \"</pre>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  '            try:',
+  '                ln = len(list(x)) if not isinstance(x, set) else len(x)',
+  '            except Exception:',
+  '                ln = len(head)',
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}(len={ln})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)} len={ln}</pre>\")",
+  '            return',
+  '        # default scalar/string',
+  "        s = str(x)",
+  "        print(f\"[[PREVIEW:{nid}:HEAD]]\" + s)",
+  "        print(f\"[[PREVIEW:{nid}:HEADHTML]]<pre>\" + _esc(s) + \"</pre>\")",
+  "        print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}\")",
+  "        print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)}</pre>\")",
+  '    except Exception:',
+  '        pass',
+  '',
+  '__pf_hash = globals().get("__pf_hash", {})',
+    'def _fp_should_run(nid, h):',
+  '    # Skip 機能をマスク：常に実行する',
+  '    try:',
+  '        d = globals().get("__pf_hash", {})',
+  '        d[nid] = h',
+  '        globals()["__pf_hash"] = d',
+  '    except Exception:',
+  '        pass',
+  '    return True',
+  '',
+  'def _fp_as_scalar(x):',
+  '    try:',
+  '        # pandas DataFrame -> scalar extraction (optional)',
+  '        try:',
+  '            import pandas as _pd',
+  '            if isinstance(x, _pd.DataFrame):',
+  '                try:',
+  '                    if getattr(x, "size", 0) == 1:',
+  '                        return x.values.tolist()[0][0]',
+  '                    if "text" in x.columns and len(x)==1:',
+  '                        return str(x["text"].iloc[0])',
+  '                except Exception: pass',
+  '                try:',
+  '                    return str(x.iloc[0,0])',
+  '                except Exception:',
+  '                    return str(x)',
+  '        except Exception:',
+  '            pass',
+  '        # numpy scalar (optional)',
+  '        try:',
+  '            import numpy as _np',
+  '            if isinstance(x, _np.ndarray):',
+  '                try: return x.item()',
+  '                except Exception: pass',
+  '        except Exception:',
+  '            pass',
+  '        # list/dict common extraction patterns',
+  '        if isinstance(x, list):',
+  '            if len(x)==1:',
+  '                e = x[0]',
+  '                if isinstance(e, dict):',
+  "                    if 'text' in e: return e.get('text')",
+  "                    if len(e)==1: return next(iter(e.values()))",
+  '                return e',
+  '        if isinstance(x, dict):',
+  "            if 'text' in x and isinstance(x['text'], (str, bytes)): return x['text']",
+  '            if len(x)==1: return next(iter(x.values()))',
   '        if isinstance(x, (list, tuple)) and len(x)==1:',
   '            return x[0]',
   '        return x',
@@ -670,9 +1047,7 @@ export function genCodeForNodes(ids, includeUpstream=true){
   const types = keptOrder.map(n=> n?.type||'');
   const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
   const pandasPythonNodes = new Set([
-    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
-    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
-    'python.Enumerate','python.Assert','python.Repeat'
+    
   ]);
   const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
   const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
@@ -688,7 +1063,7 @@ export function genCodeForNodes(ids, includeUpstream=true){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ const base = JSON.stringify(n.params||{}); const hasIn = incomingCount(n)>0; return (hasIn? (Date.now().toString(36)+base) : base); }catch(e){return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${btoa(unescape(encodeURIComponent(''+phash))).slice(0,24)}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -741,75 +1116,155 @@ export function genCodeUpTo(targetId){
     '    except Exception:',
     '        return None',
     '',
-    'def _fp_set_globals(text):',
-    '    lines = str(text).splitlines()',
-    '    env = _fp_env()',
-    '    for __ln in lines:',
-    '        __ln = __ln.strip()',
-    '        if not __ln or __ln.startswith("#"): continue',
-    '        __name, __eq, __expr = __ln.partition("=")',
-    '        __name = __name.strip(); __expr = __expr.strip()',
-    '        if not __name or not __expr: continue',
-    '        try:',
-    '            globals()[__name] = eval(__expr, env, globals())',
-    '        except Exception:',
-    '            try:',
-    '                exec(f"{__name} = (" + __expr + ")", globals())',
-    '            except Exception:',
-    '                pass',
-    '    rows = []',
-    '    for __ln in lines:',
-    '        __name, __eq, __expr = __ln.partition("=")',
-    '        __name = __name.strip()',
-    '        if not __name: continue',
-    '        try:',
-    '            __val = globals().get(__name, None)',
-    '            rows.append((__name, type(__val).__name__, repr(__val)[:200]))',
-    '        except Exception:',
-    "            rows.append((__name, 'unknown', '<unrepr>'))",
-  "    return pd.DataFrame(rows, columns=['name','type','repr'])",
-    '',
-    'def _fp_preview(df, nid):',
-    '    try:',
-    '        print(f"[[PREVIEW:{nid}:HEAD]]" + df.head().to_string())',
-    '        print(f"[[PREVIEW:{nid}:HEADHTML]]" + df.head().to_html())',
-    '    except Exception:',
-    '        pass',
-    '    try:',
-    '        print(f"[[PREVIEW:{nid}:DESC]]" + df.describe().to_string())',
-    '        print(f"[[PREVIEW:{nid}:DESCHTML]]" + df.describe().to_html())',
-    '    except Exception:',
-  '        print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+  'def _fp_set_globals(text):',
+  '    lines = str(text).splitlines()',
+  '    env = _fp_env()',
+  '    for __ln in lines:',
+  '        __ln = __ln.strip()',
+  '        if not __ln or __ln.startswith("#"): continue',
+  '        __name, __eq, __expr = __ln.partition("=")',
+  '        __name = __name.strip(); __expr = __expr.strip()',
+  '        if not __name or not __expr: continue',
+  '        try:',
+  '            globals()[__name] = eval(__expr, env, globals())',
+  '        except Exception:',
+  '            try:',
+  '                exec(__name + " = (" + __expr + ")", globals())',
+  '            except Exception:',
+  '                pass',
+  '    rows = []',
+  '    for __ln in lines:',
+  '        __name, __eq, __expr = __ln.partition("=")',
+  '        __name = __name.strip()',
+  '        if not __name: continue',
+  '        try:',
+  '            __val = globals().get(__name, None)',
+  "            rows.append({'name': __name, 'type': type(__val).__name__, 'repr': repr(__val)[:200]})",
+  '        except Exception:',
+  "            rows.append({'name': __name, 'type': 'unknown', 'repr': '<unrepr>'})",
+  '    return rows',
   '',
-  '__pf_hash = globals().get("__pf_hash", {})',
-  'def _fp_should_run(nid, h):',
-  '    d = globals().get("__pf_hash", {})',
-  '    prev = d.get(nid)',
-  '    if prev == h:',
-  '        print(f"[[SKIP:{nid}]]")',
-  '        return False',
-  '    d[nid] = h',
-  '    globals()["__pf_hash"] = d',
-  '    return True',
-  '',
-  'def _fp_as_scalar(x):',
+  'def _fp_preview(x, nid):',
+  '    def _esc(s):',
+  "        try: return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')",
+  '        except Exception: return str(s)',
   '    try:',
   '        import pandas as _pd',
   '        if isinstance(x, _pd.DataFrame):',
   '            try:',
-  '                if getattr(x, "size", 0) == 1:',
-  '                    return x.values.tolist()[0][0]',
-  '                if "text" in x.columns and len(x)==1:',
-  '                    return str(x["text"].iloc[0])',
+  '                print(f"[[PREVIEW:{nid}:HEAD]]" + x.head().to_string())',
+  '                print(f"[[PREVIEW:{nid}:HEADHTML]]" + x.head().to_html())',
   '            except Exception: pass',
   '            try:',
-  '                return str(x.iloc[0,0])',
+  '                print(f"[[PREVIEW:{nid}:DESC]]" + x.describe().to_string())',
+  '                print(f"[[PREVIEW:{nid}:DESCHTML]]" + x.describe().to_html())',
   '            except Exception:',
-  '                return str(x)',
-  '        import numpy as _np',
-  '        if isinstance(x, _np.ndarray):',
-  '            try: return x.item()',
-  '            except Exception: pass',
+  '                print(f"[[PREVIEW:{nid}:DESC]]N/A")',
+  '            return',
+  '    except Exception:',
+  '        pass',
+  '    # Fallbacks for built-in Python types',
+  '    try:',
+  '        import itertools as _it',
+  '        if isinstance(x, list) and (len(x)==0 or isinstance(x[0], dict)):',
+  '            # list-of-dicts table',
+  '            head = list(x[:5])',
+  '            cols = []',
+  '            for r in head:',
+  '                for k in (r.keys() if isinstance(r, dict) else []):',
+  '                    if k not in cols: cols.append(k)',
+  "            txt_rows = [\"\\t\".join([str(c) for c in cols])]",
+  '            for r in head:',
+  "                row = [str((r.get(c, \"\")) if isinstance(r, dict) else \"\") for c in cols]",
+  "                txt_rows.append(\"\\t\".join(row))",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + \"\\n\".join(txt_rows))",
+  "            html = [\"<table><thead><tr>\" + \"\".join([f\"<th>{_esc(c)}</th>\" for c in cols]) + \"</tr></thead><tbody>\"]",
+  '            for r in head:',
+  "                html.append(\"<tr>\" + \"\".join([\"<td>\"+_esc(r.get(c, ''))+\"</td>\" for c in cols]) + \"</tr>\")",
+  "            html.append(\"</tbody></table>\")",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + \"\".join(html))",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=list(len={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>list len={len(x)}</pre>\")",
+  '            return',
+  '        if isinstance(x, dict):',
+  "            items = list(x.items())[:10]",
+  "            txt = \"\\n\".join([f\"{k}: {v}\" for k,v in items])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<table><tbody>\" + \"\".join([f\"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>\" for k,v in items]) + \"</tbody></table>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type=dict(size={len(x)})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>dict size={len(x)}</pre>\")",
+  '            return',
+  '        if isinstance(x, (list, tuple, set)):',
+  '            head = list(_it.islice(x, 5))',
+  "            txt = \"\\n\".join([repr(i) for i in head])",
+  "            print(f\"[[PREVIEW:{nid}:HEAD]]\" + txt)",
+  "            html = \"<pre>\" + _esc(txt) + \"</pre>\"",
+  "            print(f\"[[PREVIEW:{nid}:HEADHTML]]\" + html)",
+  '            try:',
+  '                ln = len(list(x)) if not isinstance(x, set) else len(x)',
+  '            except Exception:',
+  '                ln = len(head)',
+  "            print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}(len={ln})\")",
+  "            print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)} len={ln}</pre>\")",
+  '            return',
+  '        # default scalar/string',
+  "        s = str(x)",
+  "        print(f\"[[PREVIEW:{nid}:HEAD]]\" + s)",
+  "        print(f\"[[PREVIEW:{nid}:HEADHTML]]<pre>\" + _esc(s) + \"</pre>\")",
+  "        print(f\"[[PREVIEW:{nid}:DESC]]type={type(x).__name__}\")",
+  "        print(f\"[[PREVIEW:{nid}:DESCHTML]]<pre>{_esc(type(x).__name__)}</pre>\")",
+  '    except Exception:',
+  '        pass',
+  '',
+  '__pf_hash = globals().get("__pf_hash", {})',
+  'def _fp_should_run(nid, h):',
+  "    # Skip 機能をマスク：常に実行する",
+  "    try:",
+  "        d = globals().get('__pf_hash', {})",
+  "        d[nid] = h",
+  "        globals()['__pf_hash'] = d",
+  "    except Exception:",
+  "        pass",
+  "    return True",
+  '',
+  'def _fp_as_scalar(x):',
+  '    try:',
+  '        # pandas DataFrame -> scalar extraction (optional)',
+  '        try:',
+  '            import pandas as _pd',
+  '            if isinstance(x, _pd.DataFrame):',
+  '                try:',
+  '                    if getattr(x, "size", 0) == 1:',
+  '                        return x.values.tolist()[0][0]',
+  '                    if "text" in x.columns and len(x)==1:',
+  '                        return str(x["text"].iloc[0])',
+  '                except Exception: pass',
+  '                try:',
+  '                    return str(x.iloc[0,0])',
+  '                except Exception:',
+  '                    return str(x)',
+  '        except Exception:',
+  '            pass',
+  '        # numpy scalar (optional)',
+  '        try:',
+  '            import numpy as _np',
+  '            if isinstance(x, _np.ndarray):',
+  '                try: return x.item()',
+  '                except Exception: pass',
+  '        except Exception:',
+  '            pass',
+  '        # list/dict common extraction patterns',
+  '        if isinstance(x, list):',
+  '            if len(x)==1:',
+  '                e = x[0]',
+  '                if isinstance(e, dict):',
+  "                    if 'text' in e: return e.get('text')",
+  "                    if len(e)==1: return next(iter(e.values()))",
+  '                return e',
+  '        if isinstance(x, dict):',
+  "            if 'text' in x and isinstance(x['text'], (str, bytes)): return x['text']",
+  '            if len(x)==1: return next(iter(x.values()))',
   '        if isinstance(x, (list, tuple)) and len(x)==1:',
   '            return x[0]',
   '        return x',
@@ -821,9 +1276,7 @@ export function genCodeUpTo(targetId){
   const types = keptOrder.map(n=> n?.type||'');
   const needsPandasFromPkgs = types.some(t=> t.startsWith('pandas.') || t.startsWith('sklearn.'));
   const pandasPythonNodes = new Set([
-    'python.ListCreate','python.GetGlobal','python.FileReadText','python.FileWriteCSV','python.ToDataFrame','python.StringFormat',
-    'python.JsonParse','python.JsonStringify','python.Filter','python.Const','python.Print','python.Cast','python.Now','python.ParseDate',
-    'python.Enumerate','python.Assert','python.Repeat'
+    
   ]);
   const needsPandasFromPython = types.some(t=> pandasPythonNodes.has(t));
   const needsPandas = needsPandasFromPkgs || needsPandasFromPython;
@@ -839,7 +1292,7 @@ export function genCodeUpTo(targetId){
     setLastPlotNode: (id)=> state.lastPlotNodeId=id,
     incomingCount: (node)=> incomingCount(node)
   };
-  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ return btoa(unescape(encodeURIComponent(JSON.stringify(n.params||{})))).slice(0,24);}catch{return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${phash}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
+  order.forEach(n=>{ if(!keep.has(n.id)) return; const def = registry.nodes.get(n.type); const v = 'v_'+n.id.replace(/[^a-zA-Z0-9_]/g,''); varOf[n.id]=v; const srcName = varOf[upstreamOf(n)?.id]; const phash = (()=>{ try{ const base = JSON.stringify(n.params||{}); const hasIn = incomingCount(n)>0; return (hasIn? (Date.now().toString(36)+base) : base); }catch(e){return 'na';} })(); lines.push(`print("[[NODE:${n.id}:BEGIN]]")`); lines.push(`_run = _fp_should_run('${n.id}', '${btoa(unescape(encodeURIComponent(''+phash))).slice(0,24)}')`); if(def && typeof def.code==='function'){ const raw = (def.code(n, ctx) || []); const seg = []; for(const s of raw){ const parts = String(s).split('\n'); for(const p of parts){ seg.push('  ' + p); } } lines.push('if _run:'); seg.forEach(s=> lines.push(s)); }
     const allowPreview = (pmode==='all');
     if(allowPreview){
       lines.push('try:'); lines.push(`    _fp_preview(${v}, '${n.id}')`); lines.push('except Exception:'); if(srcName){ lines.push('    try:'); lines.push(`        _fp_preview(${srcName}, '${n.id}')`); lines.push('    except Exception:'); lines.push('        pass'); } else { lines.push('    pass'); }
@@ -860,6 +1313,19 @@ export async function loadPackages(){
       try{
         // Avoid re-running register() for the same package; it would duplicate left-pane nodes
         if(__loadedPackages.has(p.name)) continue;
+        // If no entry file is provided, this is an Autogen-only logical package.
+        // Skip static import and create an empty bucket so UI can toggle and introspect on demand.
+        if(!p.entry){
+          if(!registry.byPackage.has(p.name)) registry.byPackage.set(p.name, []);
+          __loadedPackages.add(p.name);
+          continue;
+        }
+        // Skip static import for Autogen-only packages (no /pkg files on disk)
+        if(AUTOGEN_ONLY.has(p.name)){
+          if(!registry.byPackage.has(p.name)) registry.byPackage.set(p.name, []);
+          __loadedPackages.add(p.name);
+          continue;
+        }
         const mod = await import(`/pkg/${p.name}/${p.entry}`);
         if(mod && typeof mod.register==='function'){
           const reg = { 
@@ -875,17 +1341,18 @@ export async function loadPackages(){
           };
           mod.register(reg);
           __loadedPackages.add(p.name);
-        } else {
-          console.warn('[packages] no register() exported by', p.name);
-        }
+        } // silently ignore modules without register()
       }catch(e){
-        try{ console.warn('[packages] failed to load', p?.name, e); }catch{}
+        // Swallow import errors quietly to avoid console noise when files are intentionally absent
+        // Ensure package bucket exists so UI can still show toggles for Autogen
+        if(!registry.byPackage.has(p.name)) registry.byPackage.set(p.name, []);
+        __loadedPackages.add(p.name);
       }
     }
     // Ensure byPackage lists remain unique
-    try{ registry.byPackage.forEach((arr, k)=>{ const uniq = Array.from(new Set(arr)); registry.byPackage.set(k, uniq); }); }catch{}
+    try{ registry.byPackage.forEach((arr, k)=>{ const uniq = Array.from(new Set(arr)); registry.byPackage.set(k, uniq); }); }catch(e3){}
     state.activePkg = registry.packages[0]?.name || null;
-  }catch{
+  }catch(e){
     registry.packages = [];
     state.activePkg = null;
   }

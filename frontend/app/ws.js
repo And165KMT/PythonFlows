@@ -16,20 +16,22 @@ export function initWS(deps){
     if(ws && ws.readyState===1) return;
     const url = deps.buildUrl();
     ws = new WebSocket(url);
-    ws.onopen = ()=> { try{ deps.appendLog('[ws] connected'); deps.updateRunButtonsState(); }catch{} };
-    ws.onclose = ()=> { try{ deps.appendLog('[ws] closed'); deps.updateRunButtonsState(); }catch{} };
+  ws.onopen = ()=> { try{ deps.appendLog('[ws] connected'); deps.updateRunButtonsState(); }catch(e){} };
+  ws.onclose = ()=> { try{ deps.appendLog('[ws] closed'); deps.updateRunButtonsState(); }catch(e){} try{ setTimeout(()=>{ try{ ensureWS(); }catch(e){} }, 1000); }catch(e){} };
+  ws.onerror = ()=> { try{ deps.appendLog('[ws] error'); }catch(e){} try{ ws && ws.close(); }catch(e){} };
     ws.onmessage = async ev => {
       const data = JSON.parse(ev.data);
+      const mtype = data.type || data.msg_type || (data.header && data.header.msg_type) || '';
       // Kernel disabled error from server
-      if(data.type==='error' && data.content && data.content.message==='kernel feature disabled'){
-        try{ deps.onKernelDisabled && deps.onKernelDisabled(); deps.appendLog('[kernel] feature disabled'); ws && ws.close(); deps.updateRunButtonsState(); }catch{}
+      if(mtype==='error' && data.content && data.content.message==='kernel feature disabled'){
+  try{ deps.onKernelDisabled && deps.onKernelDisabled(); deps.appendLog('[kernel] feature disabled'); ws && ws.close(); deps.updateRunButtonsState(); }catch(e){}
         return;
       }
-      if (data.type === 'stream') {
+  if (mtype === 'stream') {
         const streamName = (data.content && data.content.name) ? data.content.name : '';
         const t = data.content.text || '';
         if(streamName==='stderr'){
-          try{ t.split(/\r?\n/).forEach(ln=>{ if(ln) deps.appendLog(ln, 'stderr'); }); }catch{}
+          try{ t.split(/\r?\n/).forEach(ln=>{ if(ln) deps.appendLog(ln, 'stderr'); }); }catch(e){}
           return;
         }
         // Parse preview markers (text/plain)
@@ -89,7 +91,7 @@ export function initWS(deps){
                     if(!deps.registry.byPackage.has(pkgName)) deps.registry.byPackage.set(pkgName, []);
                     deps.registry.byPackage.get(pkgName).push(id);
                   }
-                  try{ deps.renderToolbar && deps.renderToolbar(); }catch{}
+                  try{ deps.renderToolbar && deps.renderToolbar(); }catch(e){}
                   deps.appendLog(`[autogen] ${arr.length} node(s) from ${mod}`);
                 } else {
                   deps.appendLog(`[autogen] no callables found in ${mod}`);
@@ -130,9 +132,9 @@ export function initWS(deps){
               deps.appendLog(ln);
             }
           }
-          try{ deps.updatePreviewDock && deps.updatePreviewDock(); }catch{}
-        }catch{}
-      } else if (data.type === 'display_data' || data.type === 'execute_result') {
+          try{ deps.updatePreviewDock && deps.updatePreviewDock(); }catch(e){}
+        }catch(e){}
+  } else if (mtype === 'display_data' || mtype === 'execute_result') {
         const d = data.content.data || {};
         if(d['image/png']){
           let nid = (deps.state.lastPlotNodeId||'');
@@ -159,20 +161,20 @@ export function initWS(deps){
         } else {
           deps.appendLog('[output] ' + JSON.stringify(d));
         }
-      } else if (data.type === 'error') {
+  } else if (mtype === 'error') {
         try{
           deps.appendLog('[error] ' + (data.content.ename + ': ' + data.content.evalue), 'error');
           const id = deps.state.stream.currentNodeId; if(id){ const tgt = document.getElementById('prev-' + id); if(tgt){ tgt.innerHTML = `<pre style="color:#ff8888; white-space:pre-wrap; margin:0">${(data.content.evalue||'').toString().replace(/[&<>]/g, ch=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>`; const wrap=document.getElementById('prevwrap-'+id); if(wrap) wrap.open = true; } }
-        }catch{}
-      } else if (data.type === 'status') {
+  }catch(e){}
+  } else if (mtype === 'status') {
         try{
           if(data.content && data.content.execution_state==='idle'){
-            if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ deps.refreshVariables && deps.refreshVariables(); }catch{} }
+            if(pendingVarsRefresh){ pendingVarsRefresh=false; try{ deps.refreshVariables && deps.refreshVariables(); }catch(e){} }
             deps.onIdle && deps.onIdle();
           } else {
             deps.onBusy && deps.onBusy();
           }
-        }catch{}
+  }catch(e){}
       }
     };
   }

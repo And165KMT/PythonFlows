@@ -26,5 +26,5 @@ export function sanitizePython(code) {
       }
     }
     return out.join('\n');
-  } catch { return String(code || ''); }
+  } catch (e) { return String(code || ''); }
 }

@@ -10,7 +10,7 @@ async function ping(url) {
   try {
     const res = await fetch(url)
     return res.ok
-  } catch {
+  } catch (e) {
     return false
   }
 }
